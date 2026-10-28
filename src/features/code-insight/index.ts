@@ -15,6 +15,7 @@ import { findUsages, rerunActiveUsages, resetUsages, showUsageResults, showUsage
 import { HierarchyTabs, HierarchyView } from "./HierarchyView";
 import { resetHierarchy, showHierarchy } from "./hierarchy";
 import { installServerEvents } from "./servers";
+import { installServerPrompts } from "./serverPrompts";
 import { ServerStatus } from "./ServerStatus";
 
 const EDITOR_WHEN = "textEditorActive && (editorFocus || popupOpen || !toolWindowFocus)";
@@ -44,6 +45,7 @@ export function activate(): () => void {
     installProblemsEvents(),
     installProblemDecorations(),
     installServerEvents(),
+    installServerPrompts(),
     registerToolWindow({
       id: "problems",
       title: "Problems",

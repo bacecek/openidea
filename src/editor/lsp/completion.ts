@@ -50,6 +50,7 @@ import { isEmptyMarkup, renderCode, renderMarkup } from "./markdown";
 import { selectableText } from "@/ui/selectableText";
 import { iconNode } from "./iconMarkup";
 import { parameterInfoOrLeave, triggerSignatureHelp } from "./signature";
+import { startRename } from "./rename";
 import { serverBackoff } from "./availability";
 import { pathCompletionSource } from "./fileReferences";
 import { editorPrefs } from "@/platform/editorSettings";
@@ -315,15 +316,19 @@ async function applyLateEdits(view: EditorView, c: LspCompletion, insertedAt: nu
 }
 
 /** Client-side commands handled by the editor itself (VS Code ids servers commonly send). */
-const CLIENT_COMMANDS = new Set(["editor.action.triggerParameterHints", "editor.action.triggerSuggest"]);
+export function runEditorCommand(view: EditorView, command: string): boolean {
+  if (command === "editor.action.triggerParameterHints") setTimeout(() => triggerSignatureHelp(view), 0);
+  else if (command === "editor.action.triggerSuggest") setTimeout(() => startCompletion(view), 0);
+  else if (command === "editor.action.rename") setTimeout(() => void startRename(view), 0);
+  else return false;
+  return true;
+}
 
 function runCommand(view: EditorView, item: CompletionItem) {
   const command = item.command;
   if (!command?.command) return;
   const cmd = command.command;
-  if (cmd === "editor.action.triggerParameterHints") setTimeout(() => triggerSignatureHelp(view), 0);
-  else if (cmd === "editor.action.triggerSuggest") setTimeout(() => startCompletion(view), 0);
-  else if (!CLIENT_COMMANDS.has(cmd) && !cmd.startsWith("editor.")) {
+  if (!runEditorCommand(view, cmd) && !cmd.startsWith("editor.")) {
     const doc = docOf(view);
     // Server commands (auto-import, postfix…); resulting edits come back as workspace/applyEdit.
     if (doc)

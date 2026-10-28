@@ -26,6 +26,9 @@ import type { CompletionSource } from "@codemirror/autocomplete";
 import { useProject } from "@/platform/project";
 import type { Settings } from "@/platform/ipc";
 
+const startRename = vi.hoisted(() => vi.fn(async (_view: EditorView) => {}));
+vi.mock("./rename", () => ({ startRename }));
+
 function item(over: Partial<CompletionItem> = {}): CompletionItem {
   return {
     label: "create",
@@ -224,6 +227,13 @@ describe("applying completions", () => {
     apply(view, makeCompletion(item({ insertText: "close", labelDetail: "()" }), req), 4);
     expect(view.state.doc.toString()).toBe("svc.close()");
     expect(view.state.selection.main.head).toBe(11);
+  });
+
+  it("starts the rename when the item's command asks for it", async () => {
+    const { view, req } = setup("val x = na|");
+    const command = { title: "", command: "editor.action.rename", arguments: [] };
+    apply(view, makeCompletion(item({ kind: "variable", insertText: "name", command }), req), 8);
+    await vi.waitFor(() => expect(startRename).toHaveBeenCalledWith(view));
   });
 
   it("expands snippets with fields", () => {

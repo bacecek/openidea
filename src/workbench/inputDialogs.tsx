@@ -30,6 +30,7 @@ export interface ChooseItemOptions {
   items: readonly string[];
   /** Shown when `items` is empty. */
   empty?: string;
+  signal?: AbortSignal;
 }
 
 type Request =
@@ -39,13 +40,20 @@ type Request =
 const useInputDialogs = create<{ stack: Request[] }>(() => ({ stack: [] }));
 let seq = 0;
 
-function open(make: (id: number, finish: (v: string | null) => void) => Request): Promise<string | null> {
+function open(
+  make: (id: number, finish: (v: string | null) => void) => Request,
+  signal?: AbortSignal,
+): Promise<string | null> {
   return new Promise((resolve) => {
     const id = ++seq;
     const finish = (v: string | null) => {
+      signal?.removeEventListener("abort", onAbort);
       useInputDialogs.setState((s) => ({ stack: s.stack.filter((r) => r.id !== id) }));
       resolve(v);
     };
+    const onAbort = () => finish(null);
+    if (signal?.aborted) return resolve(null);
+    signal?.addEventListener("abort", onAbort);
     useInputDialogs.setState((s) => ({ stack: [...s.stack, make(id, finish)] }));
   });
 }
@@ -57,7 +65,7 @@ export function promptInput(options: PromptInputOptions): Promise<string | null>
 
 /** A list to pick one entry from; resolves with it, or null when cancelled. */
 export function chooseItem(options: ChooseItemOptions): Promise<string | null> {
-  return open((id, resolve) => ({ kind: "choose", id, options, resolve }));
+  return open((id, resolve) => ({ kind: "choose", id, options, resolve }), options.signal);
 }
 
 export function InputDialogsHost() {

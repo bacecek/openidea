@@ -1,0 +1,20 @@
+.conflicts {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.conflicts p {
+  margin: 0 0 6px;
+}
+
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.link:hover {
+  text-decoration: underline;
+}

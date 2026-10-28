@@ -250,6 +250,7 @@
   "Choose Content to Paste": "选择要粘贴的内容",
   "Choose a data source for this console": "为此控制台选择数据源",
   "Choose a start or end date": "请选择开始或结束日期",
+  "Choose an Action": "选择操作",
   "Choose configuration to debug": "选择要调试的配置",
   "Choose configuration to run": "选择要运行的配置",
   "Choose the Statement to Unwrap/Remove": "选择要解包/移除的语句",
