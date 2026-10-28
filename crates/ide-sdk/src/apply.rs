@@ -394,7 +394,9 @@ pub fn server_launch_overrides(cfg: &mut LanguageServerConfig, s: &Settings) {
 /// from Settings › Language Servers; applied last so they win over derived values.
 pub fn server_protocol_overrides(cfg: &mut LanguageServerConfig, s: &Settings) {
     let Some(ls) = s.language_servers.get(&cfg.name) else { return };
-    cfg.env.extend(ls.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let consent = |k: &str| cfg.name == "intellij-server" && ["INTELLIJ_DATA_SHARING", "INTELLIJ_REGION"].contains(&k);
+    let env: Vec<_> = ls.env.iter().filter(|(k, _)| !consent(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    cfg.env.extend(env);
     if let Some(options) = &ls.initialization_options {
         merge_init_options(cfg, options.clone());
     }

@@ -699,3 +699,23 @@ fn intellij_server_eula_of_a_managed_install() {
     configure_server(&mut cfg, tmp.path(), tmp.path(), &Settings::default());
     assert_eq!(cfg.args, ["--eula=2cf24dba5fb0a30e"]);
 }
+
+#[test]
+fn intellij_server_env_overrides_keep_the_consent_choices() {
+    use crate::apply::server_protocol_overrides;
+    use ide_core::settings::LanguageServerSettings;
+
+    let mut s = Settings::default();
+    s.languages.java.intellij_server.data_sharing = "none".into();
+    s.languages.java.intellij_server.region = "mars".into();
+    let env = [("INTELLIJ_DATA_SHARING", "full"), ("INTELLIJ_REGION", "europe"), ("OTHER", "1")];
+    let env = env.into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect();
+    s.language_servers.insert("intellij-server".into(), LanguageServerSettings { env, ..Default::default() });
+
+    let mut cfg = server("intellij-server");
+    configure_server(&mut cfg, Path::new("/p"), Path::new("/p"), &s);
+    server_protocol_overrides(&mut cfg, &s);
+    assert_eq!(cfg.env["INTELLIJ_DATA_SHARING"], "none");
+    assert!(!cfg.env.contains_key("INTELLIJ_REGION"));
+    assert_eq!(cfg.env["OTHER"], "1");
+}
