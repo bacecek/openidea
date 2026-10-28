@@ -7,7 +7,7 @@
 import { executeAction } from "@/platform/actions";
 import { onIdeEvent } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
-import { INTELLIJ_FALLBACKS, intellijSettings, intellijUndecided } from "@/features/intellij/consent";
+import { INTELLIJ_FALLBACKS, intellijSettings } from "@/features/intellij/consent";
 import { notifications } from "@/workbench/contributions";
 import { installTool, refreshTools, SETTINGS_PAGE_ID, toolByName, useTools } from "./store";
 import { tx } from "@/platform/i18n";
@@ -50,12 +50,12 @@ export function installMissingServerPrompts(): () => void {
   };
   const offEvents = onIdeEvent("languageServer", (e) => {
     if (e.status !== "missing" || prompted.has(e.name)) return;
-    if (INTELLIJ_FALLBACKS.includes(e.name) && intellijUndecided()) waiting.add(e.name);
+    if (INTELLIJ_FALLBACKS.includes(e.name) && !intellijSettings().declined) waiting.add(e.name);
     else prompt(e.name);
   });
   const offSettings = useProject.subscribe(() => {
-    if (!waiting.size || intellijUndecided()) return;
-    if (intellijSettings().declined) waiting.forEach(prompt);
+    if (!waiting.size || !intellijSettings().declined) return;
+    waiting.forEach(prompt);
     waiting.clear();
   });
   return () => {

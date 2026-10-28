@@ -156,13 +156,22 @@ describe("IntelliJ IDEA consent", () => {
     offPrompts();
   });
 
-  it("drops the jdtls install offer when the user accepts", async () => {
+  it("keeps holding the jdtls install offer after the user accepts, until a later decline", async () => {
     const offPrompts = installMissingServerPrompts();
+    backend.stepMs = 40;
     serverEvent("jdtls", "missing");
     await settle();
     await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+    serverEvent("jdtls", "missing");
+    serverEvent("kotlin-lsp", "missing");
+    await settle();
+    expect(useTools.getState().jobs["intellij-server"]).toBeDefined();
+    expect(notes).toEqual([]);
+    act(() => decided({ acceptedTerms: true, declined: true }));
+    await waitFor(() =>
+      expect(notes).toEqual(["Eclipse JDT LS is not installed", "Kotlin LSP (JetBrains) is not installed"]),
+    );
     await waitFor(() => expect(backend.restarted).toEqual(["intellij-server"]));
-    expect(notes).not.toContain("Eclipse JDT LS is not installed");
     offPrompts();
   });
 
