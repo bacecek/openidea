@@ -98,6 +98,23 @@ describe("IntelliJ IDEA consent", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("asks per project when a window switches projects", async () => {
+    useProject.setState({
+      project: { root: "/p1" } as never,
+      settings: { languageServers: { "intellij-server": { enabled: false } } } as Settings,
+    });
+    serverEvent("jdtls");
+    await settle();
+    act(() =>
+      useProject.setState({ project: { root: "/p2" } as never, settings: { languages: { java: {} } } as Settings }),
+    );
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    serverEvent("jdtls");
+    await settle();
+    expect(screen.getByRole("dialog")).toHaveTextContent("IntelliJ IDEA for Java and Kotlin");
+  });
+
   it("stays quiet for other languages and once the user has decided", async () => {
     serverEvent("gopls");
     await settle();

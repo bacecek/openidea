@@ -8,6 +8,7 @@ import { installLicensing } from "./license";
 export function activate(): () => void {
   let asked = false;
   let java = false;
+  let root = useProject.getState().project?.root;
   const offLicensing = installLicensing();
   const maybeAsk = () => {
     if (asked || !java || !useProject.getState().settings || !intellijUndecided() || !intellijEnabled()) return;
@@ -23,7 +24,14 @@ export function activate(): () => void {
     java ||= INTELLIJ_FALLBACKS.includes(e.name) || languages.some((l) => l === "java" || l === "kotlin");
     maybeAsk();
   });
-  const offSettings = useProject.subscribe(maybeAsk);
+  const offSettings = useProject.subscribe((state) => {
+    if (state.project?.root !== root) {
+      root = state.project?.root;
+      asked = false;
+      java = false;
+    }
+    maybeAsk();
+  });
   return () => {
     offConsent();
     offSettings();
