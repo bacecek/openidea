@@ -674,12 +674,12 @@ fn intellij_server_region_and_data_sharing_env() {
         s.languages.java.intellij_server.data_sharing = sharing.into();
         let mut cfg = server("intellij-server");
         configure_server(&mut cfg, Path::new("/p"), Path::new("/p"), &s);
-        (cfg.env["INTELLIJ_REGION"].clone(), cfg.env["INTELLIJ_DATA_SHARING"].clone())
+        (cfg.env.get("INTELLIJ_REGION").cloned(), cfg.env["INTELLIJ_DATA_SHARING"].clone())
     };
-    assert_eq!(env("europe", "anonymous"), ("europe".into(), "anonymous".into()));
-    assert_eq!(env("middle_east", "full"), ("middle_east".into(), "full".into()));
-    assert_eq!(env("", ""), (String::new(), "none".into()), "an empty value unsets an inherited region");
-    assert_eq!(env("mars", "everything"), (String::new(), "none".into()));
+    assert_eq!(env("europe", "anonymous"), (Some("europe".into()), "anonymous".into()));
+    assert_eq!(env("middle_east", "full"), (Some("middle_east".into()), "full".into()));
+    assert_eq!(env("", ""), (None, "none".into()));
+    assert_eq!(env("mars", "everything"), (None, "none".into()));
     let mut jdtls = server("jdtls");
     configure_server(&mut jdtls, Path::new("/p"), Path::new("/p"), &Settings::default());
     assert!(!jdtls.env.contains_key("INTELLIJ_DATA_SHARING"));

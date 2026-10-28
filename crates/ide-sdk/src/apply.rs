@@ -278,10 +278,11 @@ pub fn configure_server(cfg: &mut LanguageServerConfig, root: &Path, server_root
         }
         let ij = &s.languages.java.intellij_server;
         let regions = ["africa", "americas", "apac", "china", "europe", "middle_east", "oceania"];
-        let region = regions.into_iter().find(|r| *r == ij.region.trim()).unwrap_or_default();
+        if let Some(region) = regions.into_iter().find(|r| *r == ij.region.trim()) {
+            cfg.env.insert("INTELLIJ_REGION".into(), region.into());
+        }
         let sharing =
             ["full", "anonymous", "none"].into_iter().find(|v| *v == ij.data_sharing.trim()).unwrap_or("none");
-        cfg.env.insert("INTELLIJ_REGION".into(), region.into());
         cfg.env.insert("INTELLIJ_DATA_SHARING".into(), sharing.into());
     }
 
