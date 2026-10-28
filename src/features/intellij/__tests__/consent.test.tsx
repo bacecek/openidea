@@ -47,7 +47,7 @@ function decided(value: IntellijServerSettings | undefined) {
   useProject.setState({ settings: { languages: { java: value ? { intellijServer: value } : {} } } as Settings });
 }
 
-const serverEvent = (name: string, status: "missing" | "starting" = "starting") =>
+const serverEvent = (name: string, status: "missing" | "starting" | "stopped" = "starting") =>
   act(() => emitLocalIdeEvent({ type: "languageServer", server: 1, name, status, message: null }));
 
 const settle = () => act(async () => void (await new Promise((r) => setTimeout(r, 20))));
@@ -58,6 +58,7 @@ beforeEach(() => {
   backend = new MemoryToolsBackend(javaTools(), 1);
   setToolsBackend(backend);
   useTools.setState({ tools: [], loaded: false, loading: false, error: null, jobs: {}, logs: {} });
+  useProject.setState({ project: { root: "/p" } as never });
   decided(undefined);
   useConsentPrompt.setState({ asking: false, dismissed: false });
   render(<MessagesHost />);
@@ -110,9 +111,23 @@ describe("IntelliJ IDEA consent", () => {
     );
     await settle();
     expect(screen.queryByRole("dialog")).toBeNull();
+    serverEvent("jdtls", "stopped");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
     serverEvent("jdtls");
     await settle();
     expect(screen.getByRole("dialog")).toHaveTextContent("IntelliJ IDEA for Java and Kotlin");
+  });
+
+  it("doesn't ask again after Close Project", async () => {
+    serverEvent("jdtls");
+    await settle();
+    await userEvent.keyboard("{Escape}");
+    act(() => useProject.setState({ project: null }));
+    serverEvent("jdtls", "stopped");
+    serverEvent("kotlin-lsp");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("stays quiet for other languages and once the user has decided", async () => {

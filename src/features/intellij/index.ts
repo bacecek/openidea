@@ -11,7 +11,8 @@ export function activate(): () => void {
   let root = useProject.getState().project?.root;
   const offLicensing = installLicensing();
   const maybeAsk = () => {
-    if (asked || !java || !useProject.getState().settings || !intellijUndecided() || !intellijEnabled()) return;
+    const { project, settings } = useProject.getState();
+    if (asked || !java || !project || !settings || !intellijUndecided() || !intellijEnabled()) return;
     asked = true;
     void (async () => {
       if (!useTools.getState().loaded) await refreshTools();
@@ -20,6 +21,7 @@ export function activate(): () => void {
     })().catch((err) => console.warn("[intellij]", err));
   };
   const offConsent = onIdeEvent("languageServer", (e) => {
+    if (e.status === "stopped") return;
     const languages = useServers.getState().servers.get(e.server)?.languages ?? [];
     java ||= INTELLIJ_FALLBACKS.includes(e.name) || languages.some((l) => l === "java" || l === "kotlin");
     maybeAsk();
