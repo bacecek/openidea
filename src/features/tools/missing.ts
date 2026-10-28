@@ -7,7 +7,7 @@
 import { executeAction } from "@/platform/actions";
 import { onIdeEvent } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
-import { INTELLIJ_FALLBACKS, intellijSettings } from "@/features/intellij/consent";
+import { INTELLIJ_FALLBACKS, INTELLIJ_SERVER, intellijSettings } from "@/features/intellij/consent";
 import { notifications } from "@/workbench/contributions";
 import { installTool, refreshTools, SETTINGS_PAGE_ID, toolByName, useTools } from "./store";
 import { tx } from "@/platform/i18n";
@@ -19,9 +19,17 @@ export async function promptInstall(name: string): Promise<boolean> {
   const tool = toolByName(name);
   if (!tool || !tool.canInstall || tool.status !== "missing") return false;
   // An installed alternative (typescript-language-server for vtsls) already serves these files.
+  const declined = intellijSettings().declined;
   const served = useTools
     .getState()
-    .tools.some((t) => t.name !== name && t.kind === tool.kind && t.status !== "missing" && t.languages.some((l) => tool.languages.includes(l)));
+    .tools.some(
+      (t) =>
+        t.name !== name &&
+        !(declined && t.name === INTELLIJ_SERVER) &&
+        t.kind === tool.kind &&
+        t.status !== "missing" &&
+        t.languages.some((l) => tool.languages.includes(l)),
+    );
   if (served) return false;
   const key = missingKey(name);
   const langs = tool.languages.length ? tool.languages.join(", ") : "these files";

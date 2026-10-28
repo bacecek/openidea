@@ -175,6 +175,15 @@ describe("IntelliJ IDEA consent", () => {
     offPrompts();
   });
 
+  it("offers jdtls when IntelliJ's server is installed but turned down", async () => {
+    backend.tools = backend.tools.map((t) => (t.name === "intellij-server" ? { ...t, status: "installed" } : t));
+    decided({ acceptedTerms: true, declined: true });
+    const offPrompts = installMissingServerPrompts();
+    serverEvent("jdtls", "missing");
+    await waitFor(() => expect(notes).toEqual(["Eclipse JDT LS is not installed"]));
+    offPrompts();
+  });
+
   it("asks before installing the server from Language Servers", async () => {
     let result: unknown = "pending";
     void installTool("intellij-server").then((r) => (result = r));
