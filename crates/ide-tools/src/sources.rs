@@ -242,6 +242,26 @@ pub fn maven_pick(group: &str, artifact: &str, metadata: &str) -> IdeResult<Down
     })
 }
 
+pub fn pinned_pick(
+    version: &str,
+    files: &[(&str, u64, &str)],
+    rules: &[AssetRule],
+    platform: Platform,
+) -> IdeResult<Download> {
+    let names: Vec<&str> = files.iter().map(|(url, ..)| file_name(url)).collect();
+    let name = select_asset(&names, rules, platform)
+        .ok_or_else(|| IdeError::unavailable(format!("version {version} has no build for this platform")))?;
+    let (url, size, sha256) = files.iter().find(|(url, ..)| file_name(url) == name).expect("selected from list");
+    Ok(Download {
+        version: version.to_string(),
+        name: name.to_string(),
+        url: url.to_string(),
+        size: Some(*size),
+        sha256: Some(sha256.to_string()),
+        checksum_url: None,
+    })
+}
+
 /// Finds the hash for `file_name` in a checksum file: either a bare hex digest
 /// or `sha256sum` lines (`<hex>  <name>`).
 pub fn parse_checksum(text: &str, file_name: &str) -> Option<String> {
@@ -370,6 +390,77 @@ mod tests {
         assert!(select_asset(&[d.name.as_str()], find("lombok").unwrap().asset_rules(), LINUX).is_some());
         assert!(maven_pick("g", "a", "<metadata/>").is_err());
         assert!(maven_pick("g", "a", "<release>../x</release>").is_err());
+    }
+
+    #[test]
+    fn pinned_intellij_server() {
+        let spec = find("intellij-server").unwrap();
+        let crate::registry::Method::Release {
+            source: crate::registry::ReleaseSource::Pinned { version, files }, ..
+        } = spec.method
+        else {
+            panic!("intellij-server is not a pinned release");
+        };
+        let base = "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/";
+        let cases = [
+            (
+                Os::Mac,
+                Arch::Arm64,
+                "intellij-server-263.7084.0-aarch64.sit",
+                378499345,
+                "ea728da71e3511939b4cb8e4af4aa5e4dda6e0ab7c2bdd1830a5d110bdf2bbec",
+            ),
+            (
+                Os::Mac,
+                Arch::X64,
+                "intellij-server-263.7084.0.sit",
+                380456870,
+                "3b31cd867ce0e361bfc763ba78cf4fa1dcb1a5324b97c817a0ec045532278420",
+            ),
+            (
+                Os::Linux,
+                Arch::Arm64,
+                "intellij-server-263.7084.0-aarch64.tar.gz",
+                385782431,
+                "d5df0980acc4eeb35b1e76227caa62639fcda188649064d17b5b0de1077b38c0",
+            ),
+            (
+                Os::Linux,
+                Arch::X64,
+                "intellij-server-263.7084.0.tar.gz",
+                386777831,
+                "3842f2f457e29e58cd9c37a97482b28255d598a2ff142075753d947206c0b922",
+            ),
+            (
+                Os::Windows,
+                Arch::Arm64,
+                "intellij-server-263.7084.0-aarch64.win.zip",
+                361354713,
+                "2ce197ad10684d55334c5611433c1479ccb574e52d78e41d023e3f2dd0be4704",
+            ),
+            (
+                Os::Windows,
+                Arch::X64,
+                "intellij-server-263.7084.0.win.zip",
+                381741020,
+                "d84629cbdd79d58f021a15a75f05018518398906519a0e830df6f8a8d515e286",
+            ),
+        ];
+        for (os, arch, name, size, sha256) in cases {
+            let d = pinned_pick(version, files, spec.asset_rules(), Platform { os, arch }).unwrap();
+            assert_eq!(
+                d,
+                Download {
+                    version: "263.7084.0".into(),
+                    name: name.into(),
+                    url: format!("{base}{name}"),
+                    size: Some(size),
+                    sha256: Some(sha256.into()),
+                    checksum_url: None,
+                }
+            );
+        }
+        assert!(pinned_pick(version, files, find("jdtls").unwrap().asset_rules(), LINUX).is_err());
     }
 
     #[test]

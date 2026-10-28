@@ -941,6 +941,7 @@ impl Tools {
                 let xml = http.get_text(&sources::maven_metadata_url(group, artifact), cancel)?;
                 sources::maven_pick(group, artifact, &xml)
             }
+            ReleaseSource::Pinned { version, files } => sources::pinned_pick(version, files, assets, self.platform),
         }
     }
 

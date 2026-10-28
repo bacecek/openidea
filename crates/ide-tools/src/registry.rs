@@ -18,15 +18,29 @@ pub enum ToolKind {
 #[derive(Clone, Copy, Debug)]
 pub enum ReleaseSource {
     /// Latest GitHub release of `owner/repo`; assets plus links in the release notes.
-    GitHub { repo: &'static str },
+    GitHub {
+        repo: &'static str,
+    },
     /// `api.releases.hashicorp.com` product.
-    HashiCorp { product: &'static str },
+    HashiCorp {
+        product: &'static str,
+    },
     /// Latest Eclipse JDT LS milestone tarball from download.eclipse.org.
     EclipseJdtls,
     /// Latest version of a VS Code extension (`.vsix`) on open-vsx.org.
-    OpenVsx { namespace: &'static str, extension: &'static str },
+    OpenVsx {
+        namespace: &'static str,
+        extension: &'static str,
+    },
     /// Latest release of a Maven Central artifact (the `.jar` itself).
-    MavenCentral { group: &'static str, artifact: &'static str },
+    MavenCentral {
+        group: &'static str,
+        artifact: &'static str,
+    },
+    Pinned {
+        version: &'static str,
+        files: &'static [(&'static str, u64, &'static str)],
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +82,7 @@ impl Method {
             Method::Release { source: ReleaseSource::EclipseJdtls, .. } => "Eclipse download",
             Method::Release { source: ReleaseSource::OpenVsx { .. }, .. } => "Open VSX",
             Method::Release { source: ReleaseSource::MavenCentral { .. }, .. } => "Maven Central",
+            Method::Release { source: ReleaseSource::Pinned { .. }, .. } => "JetBrains download",
             Method::Release { .. } => "GitHub release",
         }
     }
@@ -532,6 +547,61 @@ pub static TOOLS: &[ToolSpec] = &[
         },
         version: V,
         homepage: "https://projectlombok.org",
+        needs: &[],
+    },
+    ToolSpec {
+        name: "intellij-server",
+        display: "IntelliJ IDEA Java and Kotlin server",
+        kind: LanguageServer,
+        commands: &["intellij-server"],
+        method: Method::Release {
+            source: ReleaseSource::Pinned {
+                version: "263.7084.0",
+                files: &[
+                    (
+                        "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/intellij-server-263.7084.0-aarch64.sit",
+                        378499345,
+                        "ea728da71e3511939b4cb8e4af4aa5e4dda6e0ab7c2bdd1830a5d110bdf2bbec",
+                    ),
+                    (
+                        "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/intellij-server-263.7084.0.sit",
+                        380456870,
+                        "3b31cd867ce0e361bfc763ba78cf4fa1dcb1a5324b97c817a0ec045532278420",
+                    ),
+                    (
+                        "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/intellij-server-263.7084.0-aarch64.tar.gz",
+                        385782431,
+                        "d5df0980acc4eeb35b1e76227caa62639fcda188649064d17b5b0de1077b38c0",
+                    ),
+                    (
+                        "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/intellij-server-263.7084.0.tar.gz",
+                        386777831,
+                        "3842f2f457e29e58cd9c37a97482b28255d598a2ff142075753d947206c0b922",
+                    ),
+                    (
+                        "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/intellij-server-263.7084.0-aarch64.win.zip",
+                        361354713,
+                        "2ce197ad10684d55334c5611433c1479ccb574e52d78e41d023e3f2dd0be4704",
+                    ),
+                    (
+                        "https://download.jetbrains.com/language-server/intellij-server/263.7084.0/intellij-server-263.7084.0.win.zip",
+                        381741020,
+                        "d84629cbdd79d58f021a15a75f05018518398906519a0e830df6f8a8d515e286",
+                    ),
+                ],
+            },
+            assets: &[
+                rule(Mac, Arm64, "intellij-server-263.7084.0-aarch64.sit"),
+                rule(Mac, X64, "intellij-server-263.7084.0.sit"),
+                rule(Linux, Arm64, "intellij-server-263.7084.0-aarch64.tar.gz"),
+                rule(Linux, X64, "intellij-server-263.7084.0.tar.gz"),
+                rule(Windows, Arm64, "intellij-server-263.7084.0-aarch64.win.zip"),
+                rule(Windows, X64, "intellij-server-263.7084.0.win.zip"),
+            ],
+            locate: &["intellij-server", "intellij-server.exe"],
+        },
+        version: V,
+        homepage: "https://github.com/JetBrains/intellij-lsp.nvim",
         needs: &[],
     },
     ToolSpec {

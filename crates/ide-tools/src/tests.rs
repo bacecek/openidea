@@ -248,6 +248,68 @@ esac"#,
     assert!(exe.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn intellij_server_bundle_runs_in_place() {
+    use std::io::Write;
+    let env = Env::new();
+    let fixtures = env.root.parent().unwrap().join("fixtures");
+    fs::create_dir_all(&fixtures).unwrap();
+    let archive = fixtures.join("bundle.sit");
+    let mut z = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    for (name, data, mode) in [
+        (
+            "intellij-server-263.7084.0/bin/intellij-server",
+            &b"#!/bin/sh\ncd \"$(dirname \"$0\")/..\" && cat EULA.txt lib/app.jar\n"[..],
+            0o755,
+        ),
+        ("intellij-server-263.7084.0/EULA.txt", b"eula+", 0o644),
+        ("intellij-server-263.7084.0/lib/app.jar", b"jar", 0o644),
+        ("intellij-server-263.7084.0/jbr/bin/java", b"", 0o755),
+    ] {
+        z.start_file(name, zip::write::SimpleFileOptions::default().unix_permissions(mode)).unwrap();
+        z.write_all(data).unwrap();
+    }
+    z.finish().unwrap();
+    env.script(
+        &env.sys,
+        "curl",
+        &format!(
+            r#"out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done; /bin/cp '{}' "$out""#,
+            archive.display()
+        ),
+    );
+    let tools = env.tools();
+    let info = tools.info("intellij-server", &langs()).unwrap();
+    assert!(info.can_install, "{:?}", info.unavailable_reason);
+    assert_eq!(info.install_method.as_deref(), Some("JetBrains download"));
+
+    let spec = registry::find("intellij-server").unwrap();
+    let Method::Release { locate, .. } = spec.method else { panic!("not a release") };
+    let dl = sources::Download {
+        version: "263.7084.0".into(),
+        name: "intellij-server-263.7084.0-aarch64.sit".into(),
+        url: "https://example.invalid/intellij-server-263.7084.0-aarch64.sit".into(),
+        size: None,
+        sha256: Some(sources::sha256_file(&archive).unwrap()),
+        checksum_url: None,
+    };
+    let staging = env.root.join(".staging-intellij-server");
+    fs::create_dir_all(&staging).unwrap();
+    let http = Http::new(&tools.system_path).unwrap();
+    tools.download_and_unpack(spec, &http, &dl, locate, &staging, &CancellationToken::new(), &|_| {}).unwrap();
+
+    let launcher = env.root.join("intellij-server/intellij-server-263.7084.0/bin/intellij-server");
+    assert!(launcher.is_file());
+    let info = tools.info("intellij-server", &langs()).unwrap();
+    assert_eq!(info.status, ToolStatus::Installed);
+    assert_eq!(info.version.as_deref(), Some("263.7084.0"));
+    let exe = env.root.join("intellij-server/bin/intellij-server");
+    assert_eq!(info.path.as_deref(), Some(exe.as_path()));
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "eula+jar");
+}
+
 /// npm installs go to `<tools>/node_modules` with `--prefix`.
 #[cfg(unix)]
 #[test]

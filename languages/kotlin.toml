@@ -12,7 +12,7 @@ name = "intellij-server"
 command = "intellij-server"
 args = ["--stdio"]
 root-markers = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle", "pom.xml", "MODULE.bazel", "WORKSPACE", ".idea"]
-install-hint = "Install the intellij-server bundle (https://github.com/JetBrains/intellij-lsp.nvim) and set its bin/intellij-server in Settings › Languages & Frameworks › Language Servers; needs an IntelliJ IDEA Ultimate license after a 30-day trial"
+install-hint = "Install it from Settings › Languages & Frameworks › Language Servers (IntelliJ IDEA Java and Kotlin server); needs an IntelliJ IDEA Ultimate license after a 30-day trial"
 
 [[language-servers]]
 name = "kotlin-lsp"
