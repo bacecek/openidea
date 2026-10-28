@@ -468,6 +468,21 @@ pub fn inline_completion_items(conv: &Conv, path: &Path, v: Value, server: Serve
         .collect()
 }
 
+pub fn plain_snippet_edits(v: &mut Value) {
+    match v {
+        Value::Array(items) => items.iter_mut().for_each(plain_snippet_edits),
+        Value::Object(o) => {
+            let snippet = o.get("snippet").filter(|s| s.get("kind").and_then(Value::as_str) == Some("snippet"));
+            let text = snippet.and_then(|s| s.get("value")?.as_str()).map(snippet_text);
+            if let Some(text) = text.filter(|_| !o.contains_key("newText")) {
+                o.insert("newText".into(), Value::String(text));
+            }
+            o.values_mut().for_each(plain_snippet_edits);
+        }
+        _ => {}
+    }
+}
+
 /// The text a snippet inserts with every placeholder at its default:
 /// `foo(${1:a}, $2)$0` → `foo(a, )`; a choice takes its first option.
 pub fn snippet_text(snippet: &str) -> String {

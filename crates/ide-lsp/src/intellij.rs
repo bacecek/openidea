@@ -1,12 +1,15 @@
 use crate::caps::ServerCaps;
 use crate::server::{Running, Server};
+use crate::text::Encoding;
+use crate::uri::{uri_target, uri_to_path};
 use crate::{LspManager, Target};
 use ide_core::event::{
     IntellijAccount, IntellijActiveLicense, IntellijLicenseKind, IntellijLicenseServer, IntellijLicenseView,
-    IntellijSubscription, LspRefreshKind,
+    IntellijSubscription, LspPrompt, LspRefreshKind,
 };
 use ide_core::{IdeError, IdeEvent, IdeResult, ServerId};
 use ide_language::LanguageServerConfig;
+use lsp_types as lsp;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -15,6 +18,9 @@ use std::time::Duration;
 pub(crate) const SERVER: &str = "intellij-server";
 
 const ENV_LICENSE: [&str; 3] = ["INTELLIJ_SERVER_LICENSE", "INTELLIJ_SERVER_LICENSE_FILE", "JETBRAINS_LICENSE_SERVER"];
+
+pub(crate) const EDITOR_COMMANDS: [&str; 3] =
+    ["editor.action.rename", "editor.action.triggerSuggest", "editor.action.triggerParameterHints"];
 
 const REQUESTS: [(&str, Option<&str>, u64); 12] = [
     ("state/get", None, 10_000),
@@ -141,6 +147,7 @@ fn env_license(cfg: &LanguageServerConfig) -> bool {
 pub(crate) fn add_client_capabilities(caps: &mut Value) {
     caps["experimental"]["licensingUi"] = json!(true);
     caps["window"]["showDocument"]["support"] = json!(true);
+    caps["workspace"]["workspaceEdit"]["snippetEditSupport"] = json!(true);
 }
 
 fn supports_licensing(caps: &ServerCaps) -> bool {
@@ -171,6 +178,82 @@ pub(crate) fn exit_message(server: &str, code: Option<i32>, tail: &str) -> Optio
 }
 
 impl LspManager {
+    pub(crate) fn on_intellij_notification(
+        self: &Arc<Self>,
+        server: &Arc<Server>,
+        generation: u64,
+        method: &str,
+        params: Value,
+    ) {
+        match method {
+            "intellij/copyToClipboard" => {
+                if let Some(text) = params.get("content").and_then(Value::as_str) {
+                    self.sink.emit(IdeEvent::CopyToClipboard { text: text.to_owned() });
+                }
+            }
+            "intellij/chooseAction" => self.choose_action(server.clone(), generation, params),
+            "intellij/runEditorCommand" => {
+                let Some(command) = params.get("command").and_then(Value::as_str) else { return };
+                if EDITOR_COMMANDS.contains(&command) {
+                    let path = params.get("uri").and_then(Value::as_str).map(|uri| uri_target(uri).0.into());
+                    self.sink.emit(IdeEvent::RunEditorCommand { command: command.to_owned(), path });
+                }
+            }
+            "intellij/workspaceImportState" | "intellij/workspaceImportStatus" | "intellij/ready-for-test" => {}
+            other => tracing::trace!("[{}] unhandled notification {other}", server.name),
+        }
+    }
+
+    fn choose_action(self: &Arc<Self>, server: Arc<Server>, generation: u64, params: Value) {
+        let Some(entries) = params.get("entries").and_then(Value::as_array).filter(|e| !e.is_empty()).cloned() else {
+            return;
+        };
+        let name = |e: &Value| e.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let prompt = LspPrompt::ChooseAction {
+            title: params.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            items: entries.iter().map(name).collect(),
+        };
+        let me = self.clone();
+        self.runtime.spawn_blocking(move || {
+            let chosen = me.ask(server.id, prompt).and_then(|c| entries.into_iter().find(|e| name(e) == c));
+            let command = match (chosen.as_ref().and_then(|e| e.get("command")), params.get("sessionId")) {
+                (Some(command), _) => {
+                    let mut command = command.clone();
+                    if let Some(c) = command.as_object_mut() {
+                        c.remove("title");
+                    }
+                    command
+                }
+                (None, Some(session)) => {
+                    let index = chosen.as_ref().and_then(|e| e.get("index")).cloned().unwrap_or(Value::Null);
+                    json!({ "command": "chooseModCommandAction", "arguments": [session, index] })
+                }
+                (None, None) => return,
+            };
+            let Some(run) = server.running_gen(generation) else { return };
+            let t = Target { server, run };
+            let mgr = me.clone();
+            me.runtime.spawn(async move {
+                let sent = mgr.call::<_, Value>(&t, "workspace/executeCommand", command, None, crate::LONG_TIMEOUT);
+                if let Err(e) = sent.await {
+                    tracing::warn!("{}: chosen action: {e}", t.server.name);
+                }
+            });
+        });
+    }
+
+    pub(crate) fn show_file(&self, server: &Server, enc: Encoding, params: &Value) -> bool {
+        if server.name != SERVER || params.get("external") == Some(&Value::Bool(true)) {
+            return false;
+        }
+        let Some(path) = params.get("uri").and_then(Value::as_str).and_then(uri_to_path) else { return false };
+        let selection = params.get("selection").and_then(|r| serde_json::from_value::<lsp::Range>(r.clone()).ok());
+        let selection = selection.map(|r| self.conv(enc).range(&path, r));
+        let take_focus = params.get("takeFocus") == Some(&Value::Bool(true));
+        self.sink.emit(IdeEvent::ShowDocument { path: path.into(), selection, take_focus });
+        true
+    }
+
     pub(crate) fn on_licensing_state(&self, server: &Server, params: Value) {
         self.store_licensing_state(server, params, None);
     }

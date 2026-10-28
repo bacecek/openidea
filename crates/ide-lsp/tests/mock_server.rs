@@ -232,8 +232,6 @@ fn harness_with_fallbacks(servers: &[(&str, Value)], fallbacks: &[&str]) -> Harn
 }
 
 fn harness_for(lang_id: &str, ext: &str, servers: &[(&str, Value)], fallbacks: &[&str]) -> Harness {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
     let lang = LanguageConfig {
         id: LanguageId::new(lang_id),
         name: "Mock".into(),
@@ -251,7 +249,17 @@ fn harness_for(lang_id: &str, ext: &str, servers: &[(&str, Value)], fallbacks: &
             .collect(),
         debugger: None,
     };
-    let registry = Arc::new(LanguageRegistry::from_configs(vec![lang]));
+    harness_with_registry(LanguageRegistry::from_configs(vec![lang]), lang_id, servers)
+}
+
+fn bundled_harness(lang_id: &str, servers: &[(&str, Value)]) -> Harness {
+    harness_with_registry(LanguageRegistry::load(None).unwrap(), lang_id, servers)
+}
+
+fn harness_with_registry(registry: LanguageRegistry, lang_id: &str, servers: &[(&str, Value)]) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let registry = Arc::new(registry);
     let launcher = Arc::new(MockLauncher::default());
     for (name, caps) in servers {
         *launcher.state(name).caps.lock() = caps.clone();
@@ -2329,4 +2337,258 @@ async fn editing_a_document_cancels_pending_conflicts() {
     let question = prompts(&h).into_iter().find(|p| p.0 != conflicts).unwrap().0;
     h.mgr.prompt_reply(question, Some("Yes".into()));
     assert_eq!(asked.await.unwrap().unwrap(), json!({ "title": "Yes" }));
+}
+
+// ------------------------------------------------------------------ intellij-server extensions
+
+fn intellij_caps() -> Value {
+    let mut caps = incremental_caps();
+    caps["executeCommandProvider"] = json!({ "commands": ["applyModCommand", "decompile"] });
+    caps
+}
+
+fn bundled_intellij_server(lang: &str) -> LanguageServerConfig {
+    let registry = LanguageRegistry::load(None).unwrap();
+    let servers = registry.get(&LanguageId::new(lang)).unwrap().language_servers;
+    servers.into_iter().find(|s| s.name == "intellij-server").unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_server_lists_fixes_lazily_and_applies_them_by_command() {
+    assert_eq!(bundled_intellij_server("java"), bundled_intellij_server("kotlin"));
+    let h = bundled_harness("java", &[("intellij-server", intellij_caps())]);
+    let (doc, _) = h.open("App.java", "class App { List l; }\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    let options = &s.requested("initialize")[0]["initializationOptions"];
+    assert_eq!((&options["intellijExtensions"], &options["lazyIntentions"]), (&json!(true), &json!(true)));
+
+    let lazy = json!({ "kind": "com.intellij.lsp.LazyAction", "sessionId": "s1", "index": 2 });
+    s.respond(
+        "textDocument/codeAction",
+        json!([{ "title": "Import class", "kind": "quickfix",
+                 "command": { "title": "Apply ModCommand", "command": "applyModCommand", "arguments": [lazy] } }]),
+    );
+    let actions = h.mgr.code_actions(doc, rng(0, 12, 0, 16), vec![]).await.unwrap();
+    let command = actions[0].command.clone().unwrap();
+    h.mgr.execute_command(doc, command).await.unwrap();
+    assert_eq!(
+        s.requested("workspace/executeCommand"),
+        vec![json!({ "command": "applyModCommand", "arguments": [lazy] })]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_snippet_edits_apply_as_plain_text() {
+    let h = harness(&[("intellij-server", intellij_caps()), ("mock", incremental_caps())]);
+    let (doc, path) = h.open("a.mk", "foo(1 + 2);\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let workspace_edit =
+        |s: &MockState| s.requested("initialize")[0]["capabilities"]["workspace"]["workspaceEdit"].clone();
+    assert_eq!(workspace_edit(&h.launcher.state("intellij-server"))["snippetEditSupport"], true);
+    assert_eq!(workspace_edit(&h.launcher.state("mock"))["snippetEditSupport"], Value::Null);
+
+    let applied: Arc<Mutex<Vec<WorkspaceEdit>>> = Arc::default();
+    {
+        let applied = applied.clone();
+        h.mgr.set_apply_edit_hook(Box::new(move |e| {
+            applied.lock().push(e);
+            true
+        }));
+    }
+    let edit = json!({ "documentChanges": [{ "textDocument": { "uri": uri_of(&path), "version": 1 }, "edits": [
+        { "range": {"start":{"line":0,"character":0},"end":{"line":0,"character":0}}, "newText": "int " },
+        { "range": {"start":{"line":0,"character":4},"end":{"line":0,"character":9}},
+          "snippet": { "kind": "snippet", "value": "${1:sum}$0" } }
+    ] }] });
+    let s = h.launcher.state("intellij-server");
+    let reply: Value = s.peer().request("workspace/applyEdit", json!({ "edit": edit }), None).await.unwrap();
+    assert_eq!(reply, json!({ "applied": true }));
+    let texts = |e: &WorkspaceEdit| match &e.files[0] {
+        FileEdit::Edit { edits, .. } => edits.iter().map(|e| e.new_text.clone()).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(texts(&applied.lock()[0]), vec!["int ", "sum"]);
+
+    s.respond("textDocument/codeAction", json!([{ "title": "Introduce variable", "edit": edit }]));
+    let actions = h.mgr.code_actions(doc, rng(0, 4, 0, 9), vec![]).await.unwrap();
+    let ij = actions.iter().find(|a| a.title == "Introduce variable").unwrap();
+    assert_eq!(texts(ij.edit.as_ref().unwrap()), vec!["int ", "sum"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_initialization_progress_is_shown() {
+    let h = harness(&[("intellij-server", intellij_caps()), ("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    assert_eq!(s.requested("initialize")[0]["workDoneToken"], "intellij-server-init");
+    assert_eq!(h.launcher.state("mock").requested("initialize")[0].get("workDoneToken"), None);
+
+    let progress = |value: Value| json!({ "token": "intellij-server-init", "value": value });
+    s.peer().notify("$/progress", progress(json!({ "kind": "begin", "title": "Initializing server" }))).unwrap();
+    s.peer().notify("$/progress", progress(json!({ "kind": "end" }))).unwrap();
+    let tasks = || {
+        h.events
+            .lock()
+            .iter()
+            .filter_map(|e| match e {
+                IdeEvent::Task { title, done, .. } => Some((title.clone(), *done)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    eventually(|| tasks().len() == 2).await;
+    assert_eq!(tasks(), vec![("Initializing server".to_owned(), false), ("Initializing server".to_owned(), true)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_copies_to_the_clipboard() {
+    let h = harness(&[("intellij-server", intellij_caps()), ("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    h.launcher.state("mock").peer().notify("intellij/copyToClipboard", json!({ "content": "other" })).unwrap();
+    h.launcher
+        .state("intellij-server")
+        .peer()
+        .notify("intellij/copyToClipboard", json!({ "content": "a.b.C" }))
+        .unwrap();
+    let copied = || {
+        h.events
+            .lock()
+            .iter()
+            .filter_map(|e| match e {
+                IdeEvent::CopyToClipboard { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    eventually(|| !copied().is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(copied(), vec!["a.b.C".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_choose_action_runs_or_reports_the_choice() {
+    let h = harness(&[("intellij-server", intellij_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    let lazy = |i: u32| json!({ "kind": "LazyAction", "sessionId": "n", "index": i });
+    let entry = move |name: &str, i: u32| json!({ "name": name, "command": { "title": "Apply ModCommand", "command": "applyModCommand", "arguments": [lazy(i)] } });
+    *s.responder.lock() = Some(Arc::new(move |s, method, params| {
+        (method == "workspace/executeCommand" && params["arguments"][0]["index"] == 0).then(|| {
+            let again = json!({ "title": "Then", "entries": [entry("Deeper", 9)] });
+            s.peer().notify("intellij/chooseAction", again).unwrap();
+            Value::Null
+        })
+    }));
+    let executed = || s.requested("workspace/executeCommand");
+    let choose = |params: Value| s.peer().notify("intellij/chooseAction", params).unwrap();
+
+    choose(json!({ "title": "Choose variant", "entries": [entry("First", 0), entry("Other", 1)] }));
+    choose(json!({ "sessionId": 7, "entries": [{ "index": 3, "name": "A" }, { "index": 5, "name": "B" }] }));
+    eventually(|| prompts(&h).len() == 2).await;
+    let asked = prompts(&h);
+    let new_shape = asked.iter().find(|p| matches!(&p.2, LspPrompt::ChooseAction { title, .. } if !title.is_empty()));
+    let old_shape = asked.iter().find(|p| matches!(&p.2, LspPrompt::ChooseAction { title, .. } if title.is_empty()));
+    let (new_shape, old_shape) = (new_shape.unwrap(), old_shape.unwrap());
+    assert_eq!(
+        new_shape.2,
+        LspPrompt::ChooseAction { title: "Choose variant".into(), items: vec!["First".into(), "Other".into()] }
+    );
+    assert_eq!(old_shape.2, LspPrompt::ChooseAction { title: String::new(), items: vec!["A".into(), "B".into()] });
+
+    h.mgr.prompt_reply(old_shape.0, Some("B".into()));
+    eventually(|| executed().len() == 1).await;
+    assert_eq!(executed()[0], json!({ "command": "chooseModCommandAction", "arguments": [7, 5] }));
+
+    h.mgr.prompt_reply(new_shape.0, Some("First".into()));
+    eventually(|| prompts(&h).len() == 3).await;
+    assert_eq!(executed()[1], json!({ "command": "applyModCommand", "arguments": [lazy(0)] }));
+    assert_eq!(prompts(&h)[2].2, LspPrompt::ChooseAction { title: "Then".into(), items: vec!["Deeper".into()] });
+    h.mgr.prompt_reply(prompts(&h)[2].0, None);
+
+    choose(json!({ "sessionId": 8, "title": "Old", "entries": [{ "index": 0, "name": "A" }] }));
+    eventually(|| prompts(&h).len() == 4).await;
+    h.mgr.prompt_reply(prompts(&h)[3].0, None);
+    eventually(|| executed().len() == 3).await;
+    assert_eq!(executed()[2], json!({ "command": "chooseModCommandAction", "arguments": [8, null] }));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(executed().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_editor_commands_reach_the_editor() {
+    let h = harness(&[("intellij-server", intellij_caps())]);
+    let (doc, path) = h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    let run = |params: Value| s.peer().notify("intellij/runEditorCommand", params).unwrap();
+    let editor_commands = || {
+        h.events
+            .lock()
+            .iter()
+            .filter_map(|e| match e {
+                IdeEvent::RunEditorCommand { command, path } => Some((command.clone(), path.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    run(json!({ "command": "editor.action.rename", "arguments": [], "uri": uri_of(&path) }));
+    run(json!({ "command": "editor.action.organizeImports", "arguments": [] }));
+    run(json!({ "command": "editor.action.triggerSuggest", "arguments": [] }));
+    eventually(|| editor_commands().len() == 2).await;
+
+    let command =
+        Command { title: "".into(), command: "editor.action.triggerParameterHints".into(), arguments: vec![] };
+    h.mgr.execute_command(doc, command).await.unwrap();
+    assert_eq!(
+        editor_commands(),
+        vec![
+            ("editor.action.rename".to_owned(), Some(path.clone().into())),
+            ("editor.action.triggerSuggest".to_owned(), None),
+            ("editor.action.triggerParameterHints".to_owned(), Some(path.into())),
+        ]
+    );
+    assert!(s.requested("workspace/executeCommand").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_shows_project_files_with_a_selection() {
+    let mut caps = intellij_caps();
+    caps["positionEncoding"] = json!("utf-8");
+    let h = harness(&[("intellij-server", caps), ("mock", incremental_caps())]);
+    let (_, path) = h.open("a.mk", "é😀x = 1\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let show = |name: &str, params: Value| {
+        let peer = h.launcher.state(name).peer();
+        async move { peer.request::<_, Value>("window/showDocument", params, None).await.unwrap() }
+    };
+    let selection = json!({ "start": { "line": 0, "character": 6 }, "end": { "line": 0, "character": 7 } });
+
+    let params = json!({ "uri": uri_of(&path), "selection": selection, "takeFocus": true });
+    assert_eq!(show("intellij-server", params.clone()).await, json!({ "success": true }));
+    assert_eq!(
+        show("intellij-server", json!({ "uri": uri_of(&path), "external": false })).await,
+        json!({ "success": true })
+    );
+    assert_eq!(show("mock", params).await, json!({ "success": false }));
+    let shown: Vec<(PathBuf, Option<Range>, bool)> = h
+        .events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::ShowDocument { path, selection, take_focus } => {
+                Some((path.to_path_buf(), *selection, *take_focus))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, vec![(path.clone(), Some(rng(0, 3, 0, 4)), true), (path, None, false)]);
 }

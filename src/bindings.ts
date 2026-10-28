@@ -3148,7 +3148,7 @@ export type IdeEvent =
 /**  A child process (`ssh`, `git`) asks for a credential; answered with `ssh_askpass_answer`. */
 { type: "askpass"; id: number; prompt: string; kind: AskpassKind } | 
 /**  Prompt `id` was answered (in any window) or gave up. */
-{ type: "askpassDone"; id: number } | { type: "intellijLicense"; server: ServerId; view: IntellijLicenseView } | { type: "openExternalUrl"; server: ServerId; url: string } | { type: "lspPrompt"; id: number; server: ServerId; prompt: LspPrompt } | { type: "lspPromptClosed"; id: number };
+{ type: "askpassDone"; id: number } | { type: "intellijLicense"; server: ServerId; view: IntellijLicenseView } | { type: "openExternalUrl"; server: ServerId; url: string } | { type: "lspPrompt"; id: number; server: ServerId; prompt: LspPrompt } | { type: "lspPromptClosed"; id: number } | { type: "copyToClipboard"; text: string } | { type: "runEditorCommand"; command: string; path: IpcPath | null } | { type: "showDocument"; path: IpcPath; selection: Range | null; takeFocus: boolean };
 
 /**  An identifier-like token whose text equals the searched name. */
 export type IdentifierOccurrence = {
@@ -3815,7 +3815,7 @@ export type LspConflict = {
 	range: Range | null,
 };
 
-export type LspPrompt = { kind: "messageRequest"; level: NotifyLevel; message: string; actions: string[] } | { kind: "conflicts"; title: string; conflicts: LspConflict[]; continueLabel: string; cancelLabel: string };
+export type LspPrompt = { kind: "messageRequest"; level: NotifyLevel; message: string; actions: string[] } | { kind: "conflicts"; title: string; conflicts: LspConflict[]; continueLabel: string; cancelLabel: string } | { kind: "chooseAction"; title: string; items: string[] };
 
 export type LspRefreshKind = "inlayHints" | "semanticTokens" | "codeLens";
 

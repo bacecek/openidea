@@ -201,6 +201,11 @@ fn rpc_err(server: &str, method: &str, e: RpcError) -> IdeError {
     }
 }
 
+fn with_plain_snippets<T: DeserializeOwned>(t: &Target, mut v: Value) -> IdeResult<T> {
+    convert::plain_snippet_edits(&mut v);
+    serde_json::from_value(v).map_err(|e| IdeError::new(ErrorKind::Protocol, format!("{}: {e}", t.server.name)))
+}
+
 /// Sends the user's `didOpen` for `path`, closing a transient copy of the file
 /// first (one a references search opened).
 fn user_did_open(server: &Server, run: &Running, path: &Path, uri: &lsp::Uri, params: Value) {
@@ -588,6 +593,7 @@ impl LspManager {
         }
         if server.name == intellij::SERVER {
             intellij::add_client_capabilities(&mut params["capabilities"]);
+            params["workDoneToken"] = json!("intellij-server-init");
         }
         params
     }
@@ -1252,17 +1258,8 @@ impl LspManager {
             }
             let params = json!({ "textDocument": snap.ident(), "range": lsp_range, "context": context });
             async move {
-                (
-                    t,
-                    self.call::<_, Option<Vec<lsp::CodeActionOrCommand>>>(
-                        t,
-                        "textDocument/codeAction",
-                        params,
-                        cancel,
-                        DEFAULT_TIMEOUT,
-                    )
-                    .await,
-                )
+                let r = self.call::<_, Value>(t, "textDocument/codeAction", params, cancel, DEFAULT_TIMEOUT).await;
+                (t, r.and_then(|v| with_plain_snippets::<Option<Vec<lsp::CodeActionOrCommand>>>(t, v)))
             }
         });
         let mut out = Outcome::new();
@@ -1291,12 +1288,18 @@ impl LspManager {
         else {
             return Ok(action);
         };
-        let resolved: lsp::CodeAction =
+        let resolved: Value =
             self.call(&t, "codeAction/resolve", convert::lsp_code_action(&action), None, DEFAULT_TIMEOUT).await?;
+        let resolved: lsp::CodeAction = with_plain_snippets(&t, resolved)?;
         Ok(convert::merge_code_action(&self.conv(t.enc()), action, resolved))
     }
 
     pub async fn execute_command(&self, doc: DocId, command: Command) -> IdeResult<()> {
+        if intellij::EDITOR_COMMANDS.contains(&command.command.as_str()) {
+            let path = self.snapshot(doc).ok().map(|s| s.path.into());
+            self.sink.emit(ide_core::IdeEvent::RunEditorCommand { command: command.command, path });
+            return Ok(());
+        }
         let servers = match self.snapshot(doc) {
             Ok(snap) => snap.servers,
             Err(_) => self.servers.lock().clone(),

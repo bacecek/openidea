@@ -131,6 +131,18 @@ pub enum IdeEvent {
     LspPromptClosed {
         id: u64,
     },
+    CopyToClipboard {
+        text: String,
+    },
+    RunEditorCommand {
+        command: String,
+        path: Option<crate::IpcPath>,
+    },
+    ShowDocument {
+        path: crate::IpcPath,
+        selection: Option<crate::Range>,
+        take_focus: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -138,6 +150,7 @@ pub enum IdeEvent {
 pub enum LspPrompt {
     MessageRequest { level: NotifyLevel, message: String, actions: Vec<String> },
     Conflicts { title: String, conflicts: Vec<LspConflict>, continue_label: String, cancel_label: String },
+    ChooseAction { title: String, items: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]

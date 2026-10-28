@@ -202,11 +202,10 @@ impl ClientHandler {
     }
 
     fn apply_edit(&self, mgr: &LspManager, params: Value) -> Result<Value, (i64, String)> {
-        let edit: lsp::WorkspaceEdit = params
-            .get("edit")
-            .cloned()
-            .ok_or_else(|| (codes::INVALID_PARAMS, "missing edit".to_owned()))
-            .and_then(|e| serde_json::from_value(e).map_err(|e| (codes::INVALID_PARAMS, e.to_string())))?;
+        let mut edit = params.get("edit").cloned().ok_or_else(|| (codes::INVALID_PARAMS, "missing edit".to_owned()))?;
+        convert::plain_snippet_edits(&mut edit);
+        let edit: lsp::WorkspaceEdit =
+            serde_json::from_value(edit).map_err(|e| (codes::INVALID_PARAMS, e.to_string()))?;
         // Convert before calling the hook: it re-enters document sync.
         let edit = convert::workspace_edit(&mgr.conv(self.encoding()), edit);
         let applied = match mgr.apply_edit_hook() {
@@ -252,6 +251,9 @@ impl Handler for ClientHandler {
                 }
             }
             "jetbrains/licensing/state" => mgr.on_licensing_state(&self.server, params),
+            m if m.starts_with("intellij/") && self.server.name == crate::intellij::SERVER => {
+                mgr.on_intellij_notification(&self.server, self.generation, m, params)
+            }
             "tsserver/request" => mgr.forward_tsserver_requests(self.server.clone(), self.generation, params),
             "telemetry/event" | "$/logTrace" | "$/cancelRequest" => {}
             other => tracing::trace!("[{}] unhandled notification {other}", self.server.name),
@@ -273,7 +275,7 @@ impl Handler for ClientHandler {
                     mgr.sink().emit(IdeEvent::OpenExternalUrl { server: self.server.id, url: url.to_owned() });
                     Ok(json!({ "success": true }))
                 }
-                None => Ok(json!({ "success": false })),
+                None => Ok(json!({ "success": mgr.show_file(&self.server, self.encoding(), &params) })),
             },
             "workspace/configuration" => Ok(self.configuration(&params)),
             "workspace/workspaceFolders" => Ok(mgr.workspace_folders(&self.server)),
