@@ -27,6 +27,27 @@ install-hint = "Install it from Settings › Languages & Frameworks › Language
 intellijExtensions = true
 lazyIntentions = true
 
+[language-servers.settings.jetbrains.java]
+"hints.collapse complex types" = true
+"hints.settings.method parameter" = true
+"hints.types.local variable" = true
+"settings.types.lambda parameter" = true
+"hints.types.call chain" = true
+
+[language-servers.settings.jetbrains.kotlin]
+"hints.settings.types.property" = true
+"hints.settings.types.variable" = true
+"hints.type.function.return" = true
+"hints.type.function.parameter" = true
+"hints.settings.lambda.return" = true
+"hints.lambda.receivers.parameters" = true
+"hints.settings.value.ranges" = true
+"hints.value.kotlin.time" = true
+"hints.parameters" = true
+"hints.parameters.compiled" = true
+"hints.call.chains" = false
+"hints.parameters.excluded" = false
+
 [[language-servers]]
 name = "jdtls"
 fallback = true

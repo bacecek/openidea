@@ -5,7 +5,7 @@ use crate::uri::{uri_target, uri_to_path};
 use crate::{LspManager, Target};
 use ide_core::event::{
     IntellijAccount, IntellijActiveLicense, IntellijLicenseKind, IntellijLicenseServer, IntellijLicenseView,
-    IntellijSubscription, LspPrompt, LspRefreshKind,
+    IntellijSubscription, LspPrompt, LspRefreshKind, NotifyLevel,
 };
 use ide_core::{IdeError, IdeEvent, IdeResult, ServerId};
 use ide_language::LanguageServerConfig;
@@ -197,6 +197,19 @@ impl LspManager {
                 if EDITOR_COMMANDS.contains(&command) {
                     let path = params.get("uri").and_then(Value::as_str).map(|uri| uri_target(uri).0.into());
                     self.sink.emit(IdeEvent::RunEditorCommand { command: command.to_owned(), path });
+                }
+            }
+            "intellij/importLog" => {
+                let message = params.get("message").and_then(Value::as_str).unwrap_or_default();
+                match params.get("type").and_then(Value::as_u64) {
+                    Some(1) => tracing::warn!("[{}] {message}", server.name),
+                    Some(2 | 3) => tracing::info!("[{}] {message}", server.name),
+                    _ => tracing::debug!("[{}] {message}", server.name),
+                }
+                if params.get("failed") == Some(&Value::Bool(true)) {
+                    let tool = params.get("tool").and_then(Value::as_str).unwrap_or("Build");
+                    let body = Some(format!("{tool} import failed"));
+                    self.sink.emit(IdeEvent::Notify { level: NotifyLevel::Error, title: server.name.clone(), body });
                 }
             }
             "intellij/workspaceImportState" | "intellij/workspaceImportStatus" | "intellij/ready-for-test" => {}

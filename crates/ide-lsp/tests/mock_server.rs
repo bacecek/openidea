@@ -2623,3 +2623,71 @@ async fn intellij_library_sources_are_decompiled() {
     let err = h.mgr.virtual_document("jrt:/java.base/sun/misc/Hidden.class").await.unwrap_err();
     assert!(err.message.contains("could not decompile jrt:/java.base/sun/misc/Hidden.class"), "{}", err.message);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_inlay_hint_settings_are_answered() {
+    let h = bundled_harness("java", &[("intellij-server", intellij_caps())]);
+    h.open("App.java", "class App {}\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let items = json!({ "items": [{ "section": "jetbrains.java" }, { "section": "jetbrains.kotlin" }] });
+    let reply: Value =
+        h.launcher.state("intellij-server").peer().request("workspace/configuration", items, None).await.unwrap();
+    assert_eq!(
+        reply,
+        json!([
+            {
+                "hints.collapse complex types": true,
+                "hints.settings.method parameter": true,
+                "hints.types.local variable": true,
+                "settings.types.lambda parameter": true,
+                "hints.types.call chain": true
+            },
+            {
+                "hints.settings.types.property": true,
+                "hints.settings.types.variable": true,
+                "hints.type.function.return": true,
+                "hints.type.function.parameter": true,
+                "hints.settings.lambda.return": true,
+                "hints.lambda.receivers.parameters": true,
+                "hints.settings.value.ranges": true,
+                "hints.value.kotlin.time": true,
+                "hints.parameters": true,
+                "hints.parameters.compiled": true,
+                "hints.call.chains": false,
+                "hints.parameters.excluded": false
+            }
+        ])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_failed_imports_are_reported() {
+    let h = harness(&[("intellij-server", intellij_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let peer = h.launcher.state("intellij-server").peer();
+    let log = |extra: Value| {
+        let mut line = json!({ "type": 3, "message": "line", "started": false, "failed": false, "succeeded": false });
+        for (k, v) in extra.as_object().unwrap() {
+            line[k] = v.clone();
+        }
+        peer.notify("intellij/importLog", line).unwrap();
+    };
+    log(json!({ "tool": "Maven", "started": true, "message": "Maven: importing /p" }));
+    log(json!({ "type": 2, "message": "[ERROR] Could not resolve dependencies" }));
+    log(json!({ "type": 1, "tool": "Maven", "failed": true, "message": "Could not resolve dependencies" }));
+    log(json!({ "tool": "Gradle", "started": true }));
+    log(json!({ "succeeded": true, "message": "Workspace imported successfully" }));
+    peer.notify("intellij/copyToClipboard", json!({ "content": "done" })).unwrap();
+    eventually(|| h.events.lock().iter().any(|e| matches!(e, IdeEvent::CopyToClipboard { .. }))).await;
+    let notified: Vec<(NotifyLevel, Option<String>)> = h
+        .events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::Notify { level, title, body } if title == "intellij-server" => Some((*level, body.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notified, vec![(NotifyLevel::Error, Some("Maven import failed".to_owned()))]);
+}
