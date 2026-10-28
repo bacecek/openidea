@@ -91,6 +91,26 @@ fn without_nulls(value: Value) -> Value {
     }
 }
 
+fn with_required(value: Option<&mut Value>, keys: &[&str]) {
+    if let Some(Value::Object(o)) = value {
+        for key in keys {
+            o.entry(*key).or_insert_with(|| json!(""));
+        }
+    }
+}
+
+fn parse_state(state: Value) -> serde_json::Result<LicensingState> {
+    let mut state = without_nulls(state);
+    with_required(state.get_mut("activeLicense"), &["source", "status", "product"]);
+    with_required(state.get_mut("licenseServerFlowState"), &["kind"]);
+    if let Some(Value::Array(subscriptions)) = state.pointer_mut("/jbaLicensingState/availableSubscriptions") {
+        for s in subscriptions {
+            with_required(Some(s), &["assetId", "product"]);
+        }
+    }
+    serde_json::from_value(state)
+}
+
 fn kind(state: &LicensingState) -> IntellijLicenseKind {
     let valid = state.active_license.as_ref().is_some_and(|l| l.status == "Valid");
     let jba = state.jba_licensing_state.authentication_status.as_str();
@@ -301,7 +321,7 @@ impl LspManager {
     }
 
     fn store_licensing_state(&self, server: &Server, state: Value, after_pushes: Option<u64>) {
-        let state: LicensingState = match serde_json::from_value(without_nulls(state)) {
+        let state: LicensingState = match parse_state(state) {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("{}: bad licensing state: {e}", server.name);
@@ -432,14 +452,33 @@ mod tests {
 
     #[test]
     fn grace_deadline_is_dropped_while_licensed() {
-        let state: LicensingState = serde_json::from_value(without_nulls(json!({
+        let state = parse_state(json!({
             "activeLicense": { "source": "trial", "status": "Valid", "product": "IIU" },
             "jbaLicensingState": { "authenticationStatus": "NotAuthenticated", "errorMessage": null },
             "graceDeadline": 1767225600000u64,
-        })))
+        }))
         .unwrap();
         let view = view(state, false);
         assert_eq!(view.kind, IntellijLicenseKind::Licensed);
         assert_eq!(view.grace_deadline, None);
+    }
+
+    #[test]
+    fn a_missing_field_keeps_the_rest_of_the_state() {
+        let state = parse_state(json!({
+            "activeLicense": { "source": "subscription", "status": "Valid" },
+            "jbaLicensingState": {
+                "authenticationStatus": "Authenticated",
+                "availableSubscriptions": [{ "assetId": "A1", "status": "Valid" }]
+            },
+            "licenseServerFlowState": { "serverAddress": "https://ls.example.com" },
+        }))
+        .unwrap();
+        let view = view(state, false);
+        assert_eq!(view.kind, IntellijLicenseKind::Licensed);
+        assert_eq!(view.license.unwrap().product, "");
+        assert_eq!(view.subscriptions[0].asset_id, "A1");
+        assert_eq!(view.license_server.kind, "");
+        assert_eq!(view.license_server.server_address.as_deref(), Some("https://ls.example.com"));
     }
 }
