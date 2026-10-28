@@ -108,8 +108,14 @@ export function askConsent(): Promise<Consent> {
 async function showConsent(): Promise<Consent> {
   const current = intellijSettings();
   let choice: Choice = { region: current.region || "europe", dataSharing: current.dataSharing || "none" };
+  const answered = new AbortController();
+  const unsubscribe = useProject.subscribe(() => {
+    const now = intellijSettings();
+    if ((now.acceptedTerms && !current.acceptedTerms) || (now.declined && !current.declined)) answered.abort();
+  });
   const r = await ask({
     title: "IntelliJ IDEA for Java and Kotlin",
+    signal: answered.signal,
     body: <ConsentBody initial={choice} onChange={(c) => (choice = c)} />,
     icon: "info",
     width: 520,
@@ -117,7 +123,7 @@ async function showConsent(): Promise<Consent> {
       { id: "accept", label: "Accept and Install", primary: true },
       { id: "decline", label: "Not now" },
     ],
-  });
+  }).finally(unsubscribe);
   if (r.button === "accept") {
     await save({ ...current, ...choice, acceptedTerms: true, declined: false });
     return "accepted";

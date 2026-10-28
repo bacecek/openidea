@@ -192,4 +192,15 @@ describe("IntelliJ IDEA consent", () => {
     expect(settingsSet).not.toHaveBeenCalled();
     expect(backend.restarted).toEqual(["intellij-server", "intellij-server"]);
   });
+
+  it("closes without writing when another window answers", async () => {
+    serverEvent("jdtls");
+    await settle();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    act(() => decided({ acceptedTerms: true, region: "europe", dataSharing: "none" }));
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(settingsSet).not.toHaveBeenCalled();
+    expect(backend.restarted).toEqual([]);
+  });
 });
