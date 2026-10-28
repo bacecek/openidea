@@ -2592,3 +2592,34 @@ async fn intellij_shows_project_files_with_a_selection() {
         .collect();
     assert_eq!(shown, vec![(path.clone(), Some(rng(0, 3, 0, 4)), true), (path, None, false)]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_library_sources_are_decompiled() {
+    let h = harness_for("java", "java", &[("intellij-server", intellij_caps())], &[]);
+    let (doc, _) = h.open("App.java", "class App { String s; }\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    let jar = "jar:///opt/jdk/lib/src.zip!/java.base/java/lang/String.java";
+    let range = json!({ "start": { "line": 172, "character": 19 }, "end": { "line": 172, "character": 25 } });
+    s.respond("textDocument/definition", json!([{ "uri": jar, "range": range }]));
+    let defs = h.mgr.goto(doc, Pos::new(0, 13), GotoKind::Definition).await.unwrap();
+    assert_eq!(defs[0].uri.as_deref(), Some(jar));
+
+    s.respond(
+        "workspace/executeCommand",
+        json!({ "code": "package java.lang;\n\npublic final class String {}\n", "language": "java" }),
+    );
+    let vd = h.mgr.virtual_document(jar).await.unwrap();
+    assert_eq!(s.requested("workspace/executeCommand"), vec![json!({ "command": "decompile", "arguments": [jar] })]);
+    assert_eq!(vd.text, "package java.lang;\n\npublic final class String {}\n");
+    assert_eq!(vd.language_id.as_str(), "java");
+    assert_eq!(vd.title, "String.java");
+    assert_eq!(vd.description.as_deref(), Some("/opt/jdk/lib/src.zip › java.base"));
+    assert!(!vd.decompiled);
+    assert_eq!(h.mgr.virtual_document(jar).await.unwrap(), vd);
+    assert_eq!(s.requested("workspace/executeCommand").len(), 1);
+
+    s.respond("workspace/executeCommand", Value::Null);
+    let err = h.mgr.virtual_document("jrt:/java.base/sun/misc/Hidden.class").await.unwrap_err();
+    assert!(err.message.contains("could not decompile jrt:/java.base/sun/misc/Hidden.class"), "{}", err.message);
+}

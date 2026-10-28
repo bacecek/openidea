@@ -1768,6 +1768,7 @@ impl LspManager {
         let mut error = None;
         for t in &targets {
             let languages = t.server.languages();
+            let mut language = None;
             let serves_scheme = t.caps().content_schemes().contains(&scheme);
             let result: IdeResult<Option<String>> = if serves_scheme {
                 self.call::<_, Option<Value>>(
@@ -1782,6 +1783,17 @@ impl LspManager {
             } else if scheme == "jdt" && languages.iter().any(|l| l.as_str() == "java") {
                 self.call::<_, Option<String>>(t, "java/classFileContents", json!({ "uri": uri }), None, LONG_TIMEOUT)
                     .await
+            } else if matches!(scheme.as_str(), "jar" | "jrt") && t.server.name == intellij::SERVER {
+                let params = json!({ "command": "decompile", "arguments": [uri] });
+                self.call::<_, Option<Value>>(t, "workspace/executeCommand", params, None, LONG_TIMEOUT).await.and_then(
+                    |v| {
+                        let code = v.as_ref().and_then(|v| v.get("code")?.as_str());
+                        let code = code
+                            .ok_or_else(|| IdeError::not_found(format!("{} could not decompile {uri}", t.server.name)));
+                        language = v.as_ref().and_then(|v| v.get("language")?.as_str()).map(LanguageId::new);
+                        code.map(|c| Some(c.to_owned()))
+                    },
+                )
             } else {
                 continue;
             };
@@ -1796,7 +1808,9 @@ impl LspManager {
             let decompiled = virtual_doc::is_decompiled(&text);
             let title = virtual_doc::title(uri, decompiled);
             let detected = self.languages.detect(Path::new(&title), None);
-            let language_id = if detected == LanguageId::plain_text() {
+            let language_id = if let Some(l) = language.filter(|l| self.languages.get(l).is_some()) {
+                l
+            } else if detected == LanguageId::plain_text() {
                 languages.first().cloned().unwrap_or(detected)
             } else {
                 detected
