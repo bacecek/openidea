@@ -3302,6 +3302,13 @@ export type InstallEvent =
 /**  Download progress; `fraction` is 0..1 when the size is known. */
 { type: "progress"; fraction: number | null; message: string };
 
+export type IntellijServerSettings = {
+	acceptedTerms?: boolean,
+	declined?: boolean,
+	region?: string,
+	dataSharing?: string,
+};
+
 /**  Optional parts of the invalidation; the symbol index is always rebuilt. */
 export type InvalidateCachesOptions = {
 	/**  Local History of every project. */
@@ -3384,6 +3391,7 @@ export type JavaSettings = {
 	jdtlsVmArgs?: string,
 	/**  Build Tools › Maven. */
 	maven?: MavenSettings,
+	intellijServer?: IntellijServerSettings,
 };
 
 /**  Java versions a vendor publishes. */

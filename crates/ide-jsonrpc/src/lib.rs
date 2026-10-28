@@ -364,6 +364,10 @@ impl Peer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for (k, _) in env.iter().filter(|(_, v)| v.is_empty()) {
+            cmd.env_remove(k);
+        }
+        cmd.env_remove("IJ_LAUNCHER_DEBUG");
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
         let stdout = child.stdout.take().ok_or_else(|| std::io::Error::other("child stdout unavailable"))?;

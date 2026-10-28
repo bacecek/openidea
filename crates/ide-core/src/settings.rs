@@ -559,6 +559,16 @@ pub struct JavaSettings {
     pub jdtls_vm_args: String,
     /// Build Tools › Maven.
     pub maven: MavenSettings,
+    pub intellij_server: IntellijServerSettings,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct IntellijServerSettings {
+    pub accepted_terms: bool,
+    pub declined: bool,
+    pub region: String,
+    pub data_sharing: String,
 }
 
 /// Build Tools › Maven.

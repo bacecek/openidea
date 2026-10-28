@@ -439,3 +439,22 @@ async fn output_before_the_handshake_is_reported_not_dropped() {
     assert!(lines.iter().any(|l| l == "python: not found"), "{lines:?}");
     assert!(lines.iter().any(|l| l.ends_with(". . .") && l.len() > 6), "{lines:?}");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn spawned_server_env_drops_launcher_debug_and_empty_values() {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    let env = [("IJ_LAUNCHER_DEBUG".into(), "1".into()), ("GONE".into(), String::new()), ("KEPT".into(), "1".into())];
+    let peer = Peer::spawn(
+        "sh",
+        &["-c".into(), "echo ${IJ_LAUNCHER_DEBUG-unset} ${GONE-unset} ${KEPT-unset} >&2".into()],
+        &std::env::temp_dir(),
+        &env,
+        Arc::new(NoopHandler),
+        Box::new(move |l| sink.lock().push(l)),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peer.closed()).await.unwrap();
+    eventually(|| lines.lock().iter().any(|l| l == "unset unset 1")).await;
+}

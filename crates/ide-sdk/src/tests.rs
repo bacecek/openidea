@@ -653,3 +653,49 @@ fn intellij_server_eula_and_default_sdk() {
     configure_server(&mut cfg, tmp.path(), tmp.path(), &Settings::default());
     assert!(cfg.args.is_empty(), "a bundle without EULA.txt gets no --eula");
 }
+
+#[test]
+fn intellij_server_runs_only_after_the_terms_are_accepted() {
+    use crate::apply::language_servers;
+    let defined = [server("intellij-server"), LanguageServerConfig { fallback: true, ..server("jdtls") }];
+    let names = |s: &Settings| language_servers("java", &defined, s).into_iter().map(|c| c.name).collect::<Vec<_>>();
+    let mut s: Settings = toml::from_str("[languages.java.intellijServer]\nacceptedTerms = true").unwrap();
+    assert_eq!(names(&s), ["intellij-server", "jdtls"]);
+    s.languages.java.intellij_server.declined = true;
+    assert_eq!(names(&s), ["jdtls"]);
+    assert_eq!(names(&Settings::default()), ["jdtls"]);
+}
+
+#[test]
+fn intellij_server_region_and_data_sharing_env() {
+    let env = |region: &str, sharing: &str| {
+        let mut s = Settings::default();
+        s.languages.java.intellij_server.region = region.into();
+        s.languages.java.intellij_server.data_sharing = sharing.into();
+        let mut cfg = server("intellij-server");
+        configure_server(&mut cfg, Path::new("/p"), Path::new("/p"), &s);
+        (cfg.env["INTELLIJ_REGION"].clone(), cfg.env["INTELLIJ_DATA_SHARING"].clone())
+    };
+    assert_eq!(env("europe", "anonymous"), ("europe".into(), "anonymous".into()));
+    assert_eq!(env("middle_east", "full"), ("middle_east".into(), "full".into()));
+    assert_eq!(env("", ""), (String::new(), "none".into()), "an empty value unsets an inherited region");
+    assert_eq!(env("mars", "everything"), (String::new(), "none".into()));
+    let mut jdtls = server("jdtls");
+    configure_server(&mut jdtls, Path::new("/p"), Path::new("/p"), &Settings::default());
+    assert!(!jdtls.env.contains_key("INTELLIJ_DATA_SHARING"));
+}
+
+#[test]
+fn intellij_server_eula_of_a_managed_install() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tool = tmp.path().join("intellij-server");
+    std::fs::create_dir_all(tool.join("bin")).unwrap();
+    std::fs::create_dir_all(tool.join("intellij-server-263.7084.0/bin")).unwrap();
+    std::fs::write(tool.join("bin/intellij-server"), "").unwrap();
+    std::fs::write(tool.join("intellij-server-263.7084.0/EULA.txt"), "hello").unwrap();
+
+    let mut cfg = server("intellij-server");
+    cfg.command = tool.join("bin/intellij-server").to_string_lossy().into_owned();
+    configure_server(&mut cfg, tmp.path(), tmp.path(), &Settings::default());
+    assert_eq!(cfg.args, ["--eula=2cf24dba5fb0a30e"]);
+}

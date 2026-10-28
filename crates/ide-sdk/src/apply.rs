@@ -276,6 +276,13 @@ pub fn configure_server(cfg: &mut LanguageServerConfig, root: &Path, server_root
         if let Some(jdk) = project_jdk(root, s) {
             merge_init_options(cfg, json!({ "defaultSdk": jdk.home.to_string_lossy() }));
         }
+        let ij = &s.languages.java.intellij_server;
+        let regions = ["africa", "americas", "apac", "china", "europe", "middle_east", "oceania"];
+        let region = regions.into_iter().find(|r| *r == ij.region.trim()).unwrap_or_default();
+        let sharing =
+            ["full", "anonymous", "none"].into_iter().find(|v| *v == ij.data_sharing.trim()).unwrap_or("none");
+        cfg.env.insert("INTELLIJ_REGION".into(), region.into());
+        cfg.env.insert("INTELLIJ_DATA_SHARING".into(), sharing.into());
     }
 
     if let Some(lib) = tsdk(server_root, s).or_else(|| tsdk(root, s)) {
@@ -315,14 +322,20 @@ fn intellij_eula_hash(root: &Path, command: &str) -> Option<String> {
     use sha2::Digest;
     let bin = setting_path(root, command).filter(|p| p.is_file()).or_else(|| which(command))?;
     let bundle = dunce::canonicalize(bin).ok()?.parent()?.parent()?.to_path_buf();
-    let eula = std::fs::read(bundle.join("EULA.txt")).ok()?;
+    let eula = std::fs::read(bundle.join("EULA.txt")).ok().or_else(|| {
+        std::fs::read_dir(&bundle).ok()?.flatten().find_map(|e| std::fs::read(e.path().join("EULA.txt")).ok())
+    })?;
     Some(sha2::Sha256::digest(eula).iter().take(8).map(|b| format!("{b:02x}")).collect())
 }
 
 /// The servers `language` uses after Settings › Language Servers: the
 /// definition's ones that aren't disabled, then the ones defined in settings for it.
 pub fn language_servers(language: &str, defined: &[LanguageServerConfig], s: &Settings) -> Vec<LanguageServerConfig> {
-    let enabled = |name: &str| s.language_servers.get(name).is_none_or(|ls| ls.enabled);
+    let ij = &s.languages.java.intellij_server;
+    let enabled = |name: &str| {
+        s.language_servers.get(name).is_none_or(|ls| ls.enabled)
+            && (name != "intellij-server" || (ij.accepted_terms && !ij.declined))
+    };
     let mut out: Vec<LanguageServerConfig> = defined.iter().filter(|c| enabled(&c.name)).cloned().collect();
     for (name, ls) in &s.language_servers {
         if ls.enabled && ls.languages.iter().any(|l| l == language) && !out.iter().any(|c| &c.name == name) {
