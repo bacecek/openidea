@@ -71,6 +71,13 @@ fn read_layer(file: &Path) -> Option<Json> {
     }
 }
 
+fn drop_global_only(layer: &mut Json) -> bool {
+    layer
+        .pointer_mut("/languages/java")
+        .and_then(Json::as_object_mut)
+        .is_some_and(|java| java.remove("intellijServer").is_some())
+}
+
 /// Merges `layer` onto `merged` if the result still deserializes.
 fn try_merge(merged: &mut Json, layer: Json) -> Result<(), String> {
     let mut candidate = merged.clone();
@@ -178,10 +185,12 @@ impl SettingsStore {
 
     fn compute(&self) -> Settings {
         let mut merged = defaults_json();
-        for (_, file) in self.layers() {
-            if let Some(layer) = read_layer(&file)
-                && let Err(e) = try_merge(&mut merged, layer)
-            {
+        for (scope, file) in self.layers() {
+            let Some(mut layer) = read_layer(&file) else { continue };
+            if scope == SettingsScope::Project && drop_global_only(&mut layer) {
+                tracing::warn!("{}: languages.java.intellijServer is only read from global settings", file.display());
+            }
+            if let Err(e) = try_merge(&mut merged, layer) {
                 tracing::warn!("{} has invalid settings, ignoring it: {e}", file.display());
             }
         }
@@ -201,6 +210,11 @@ impl SettingsStore {
         let segments: Vec<&str> = key.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
             return Err(IdeError::invalid(format!("invalid settings key {key:?}")));
+        }
+        if scope == SettingsScope::Project
+            && drop_global_only(&mut segments.iter().rev().fold(value.clone(), |v, seg| serde_json::json!({ *seg: v })))
+        {
+            return Err(IdeError::invalid("languages.java.intellijServer can only be set in global settings"));
         }
         let defaults = defaults_json();
         let mut cursor = &defaults;
@@ -234,7 +248,10 @@ impl SettingsStore {
         for (layer_scope, layer_file) in self.layers() {
             let is_target = layer_scope == scope;
             let layer = if is_target { parse_layer(&new_text).ok() } else { read_layer(&layer_file) };
-            let Some(layer) = layer else { continue };
+            let Some(mut layer) = layer else { continue };
+            if layer_scope == SettingsScope::Project {
+                drop_global_only(&mut layer);
+            }
             if let Err(e) = try_merge(&mut merged, layer)
                 && is_target
             {
@@ -500,5 +517,37 @@ mod tests {
         assert_eq!(toolbar.hidden, ["vcs.branch"]);
         let s = store.set(SettingsScope::Global, "appearance.mainToolbar", Json::Null).unwrap();
         assert_eq!(s.appearance.main_toolbar, None);
+    }
+
+    #[test]
+    fn intellij_server_consent_comes_only_from_global_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("cfg");
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::create_dir_all(proj.join(".openidea")).unwrap();
+        std::fs::write(cfg.join("settings.toml"), "[languages.java.intellijServer]\ndeclined = true\n").unwrap();
+        std::fs::write(
+            proj.join(".openidea/settings.toml"),
+            "[languages.java]\njdtlsVmArgs = \"-Xmx2g\"\n[languages.java.intellijServer]\nacceptedTerms = true\ndeclined = false\ndataSharing = \"full\"\n",
+        )
+        .unwrap();
+        let store = SettingsStore::load(&cfg, Some(&proj));
+        let s = store.effective();
+        assert_eq!(s.languages.java.jdtls_vm_args, "-Xmx2g");
+        let ij = &s.languages.java.intellij_server;
+        assert!(!ij.accepted_terms && ij.declined && ij.data_sharing.is_empty());
+
+        for (key, value) in [
+            ("languages.java.intellijServer.acceptedTerms", json!(true)),
+            ("languages.java.intellijServer", json!({ "acceptedTerms": true })),
+            ("languages.java", json!({ "intellijServer": { "acceptedTerms": true } })),
+        ] {
+            let err = store.set(SettingsScope::Project, key, value).unwrap_err();
+            assert_eq!(err.kind, ide_core::error::ErrorKind::InvalidInput, "{key}");
+        }
+        let s = store.set(SettingsScope::Global, "languages.java.intellijServer.declined", json!(false)).unwrap();
+        assert!(!s.languages.java.intellij_server.declined);
+        assert!(!s.languages.java.intellij_server.accepted_terms);
     }
 }
