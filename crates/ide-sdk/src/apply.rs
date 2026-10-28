@@ -2,7 +2,7 @@
 //! language servers, run configurations and terminals.
 
 use crate::discover::{project_venv_python, workspace_tsdk};
-use crate::exec::{path_with, search_path};
+use crate::exec::{path_with, search_path, which};
 use crate::{bin_dir, exe, venv_of};
 use crate::{godot, vue};
 use ide_core::settings::{LanguageServerSettings, Settings};
@@ -269,6 +269,15 @@ pub fn configure_server(cfg: &mut LanguageServerConfig, root: &Path, server_root
         }
     }
 
+    if name == "intellij-server" {
+        if let Some(hash) = intellij_eula_hash(root, &cfg.command) {
+            cfg.args.push(format!("--eula={hash}"));
+        }
+        if let Some(jdk) = project_jdk(root, s) {
+            merge_init_options(cfg, json!({ "defaultSdk": jdk.home.to_string_lossy() }));
+        }
+    }
+
     if let Some(lib) = tsdk(server_root, s).or_else(|| tsdk(root, s)) {
         let lib_s = lib.to_string_lossy().into_owned();
         match name {
@@ -300,6 +309,14 @@ pub fn configure_server(cfg: &mut LanguageServerConfig, root: &Path, server_root
         let dirs: Vec<&Path> = path_dirs.iter().map(PathBuf::as_path).collect();
         cfg.env.insert("PATH".into(), path_with(&dirs));
     }
+}
+
+fn intellij_eula_hash(root: &Path, command: &str) -> Option<String> {
+    use sha2::Digest;
+    let bin = setting_path(root, command).filter(|p| p.is_file()).or_else(|| which(command))?;
+    let bundle = dunce::canonicalize(bin).ok()?.parent()?.parent()?.to_path_buf();
+    let eula = std::fs::read(bundle.join("EULA.txt")).ok()?;
+    Some(sha2::Sha256::digest(eula).iter().take(8).map(|b| format!("{b:02x}")).collect())
 }
 
 /// The servers `language` uses after Settings › Language Servers: the

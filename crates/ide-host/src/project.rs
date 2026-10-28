@@ -151,6 +151,10 @@ impl Host {
                     );
                     ide_sdk::jdtls::launch_directly(cfg);
                 }
+                if cfg.name == "intellij-server" {
+                    let system = data_dir.join("lsp").join("intellij-server").join(self::project_key(server_root));
+                    cfg.args.extend(["--system-path".into(), system.to_string_lossy().into_owned()]);
+                }
                 ide_sdk::apply::server_protocol_overrides(cfg, &effective);
             }));
         }

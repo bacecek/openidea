@@ -625,3 +625,31 @@ fn max_java_picks_an_older_jdk() {
     crate::java::cap_java_home(&mut free, &jdks);
     assert_eq!(free.env["JAVA_HOME"], j25.home.to_string_lossy());
 }
+
+#[cfg(unix)]
+#[test]
+fn intellij_server_eula_and_default_sdk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("bundle");
+    std::fs::create_dir_all(bundle.join("bin")).unwrap();
+    std::fs::write(bundle.join("bin/intellij-server"), "").unwrap();
+    std::fs::write(bundle.join("EULA.txt"), "hello").unwrap();
+    std::os::unix::fs::symlink(bundle.join("bin/intellij-server"), tmp.path().join("intellij-server")).unwrap();
+    fake_jdk(&tmp.path().join("jdk17"));
+    let mut s = Settings::default();
+    s.languages.java.jdk = "jdk17".into();
+
+    let mut cfg = server("intellij-server");
+    cfg.command = tmp.path().join("intellij-server").to_string_lossy().into_owned();
+    cfg.args = vec!["--stdio".into()];
+    configure_server(&mut cfg, tmp.path(), tmp.path(), &s);
+    assert_eq!(cfg.args, ["--stdio", "--eula=2cf24dba5fb0a30e"]);
+    let options = serde_json::to_value(cfg.initialization_options.unwrap()).unwrap();
+    assert_eq!(options["defaultSdk"], project_jdk(tmp.path(), &s).unwrap().home.to_string_lossy().as_ref());
+
+    std::fs::remove_file(bundle.join("EULA.txt")).unwrap();
+    let mut cfg = server("intellij-server");
+    cfg.command = bundle.join("bin/intellij-server").to_string_lossy().into_owned();
+    configure_server(&mut cfg, tmp.path(), tmp.path(), &Settings::default());
+    assert!(cfg.args.is_empty(), "a bundle without EULA.txt gets no --eula");
+}

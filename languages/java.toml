@@ -17,7 +17,15 @@ transport = "tcp"
 install-hint = "Install Microsoft java-debug (Settings › Languages & Frameworks › Language Servers › Java Debugger)"
 
 [[language-servers]]
+name = "intellij-server"
+command = "intellij-server"
+args = ["--stdio"]
+root-markers = ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle", "pom.xml", "MODULE.bazel", "WORKSPACE", ".idea"]
+install-hint = "Install the intellij-server bundle (https://github.com/JetBrains/intellij-lsp.nvim) and set its bin/intellij-server in Settings › Languages & Frameworks › Language Servers; needs an IntelliJ IDEA Ultimate license after a 30-day trial"
+
+[[language-servers]]
 name = "jdtls"
+fallback = true
 command = "jdtls"
 root-markers = ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "build.xml", ".project"]
 install-hint = "Install Eclipse JDT Language Server (brew install jdtls, or https://github.com/eclipse-jdtls/eclipse.jdt.ls); requires JDK 21+"

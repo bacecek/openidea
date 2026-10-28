@@ -169,9 +169,10 @@ impl LspManager {
     async fn jdtls(&self, path: &Path) -> IdeResult<(Arc<Server>, Running)> {
         let java = LanguageId::new("java");
         let server = self
-            .servers_for(&java, path)
+            .language_servers(&java)
             .into_iter()
-            .find(|s| s.name == SERVER)
+            .find(|c| c.name == SERVER)
+            .map(|c| self.server_for(&c, &java, path))
             .ok_or_else(|| IdeError::unavailable("no Java language server (jdtls) is configured"))?;
         self.ensure_started(&server);
         match server.wait_ready(READY_TIMEOUT).await {

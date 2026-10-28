@@ -346,3 +346,99 @@ async fn vue_hybrid_mode_end_to_end() {
         tokio::time::timeout(Duration::from_secs(10), mgr.shutdown_all()).await.unwrap();
     }
 }
+
+const MAIN_JAVA: &str = "package demo;
+
+public class Main {
+    /** Adds two numbers. */
+    static int add(int a, int b) {
+        return a + b;
+    }
+
+    public static void main(String[] args) {
+        int s = add(1, 2);
+        System.out.println(s);
+    }
+}
+";
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a licensed intellij-server bundle (OPENIDEA_TEST_INTELLIJ_SERVER=<bundle>/bin/intellij-server)"]
+async fn intellij_server_end_to_end() {
+    let bin = std::env::var("OPENIDEA_TEST_INTELLIJ_SERVER").expect("OPENIDEA_TEST_INTELLIJ_SERVER");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>demo</groupId><artifactId>demo</artifactId>\
+         <version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties></project>",
+    )
+    .unwrap();
+    let src = root.join("src/main/java/demo");
+    std::fs::create_dir_all(&src).unwrap();
+    let main = src.join("Main.java");
+    std::fs::write(&main, MAIN_JAVA).unwrap();
+
+    let registry = LanguageRegistry::load(None).unwrap();
+    let mut configs = Vec::new();
+    for id in ["java", "kotlin"] {
+        let mut l = registry.get(&LanguageId::new(id)).unwrap();
+        assert_eq!(l.language_servers[0].name, "intellij-server");
+        l.language_servers[0].command = bin.clone();
+        configs.push(l);
+    }
+    let (mgr, events) = manager(&root, LanguageRegistry::from_configs(configs));
+    let mut settings = ide_core::settings::Settings::default();
+    settings.languages.java.jdk = std::env::var("JAVA_HOME").unwrap_or_default();
+    {
+        let root = root.clone();
+        mgr.set_config_hook(Box::new(move |cfg, server_root| {
+            ide_sdk::apply::configure_server(cfg, &root, server_root, &settings)
+        }));
+    }
+    let doc = DocId::next();
+    mgr.did_open(doc, &main, &LanguageId::new("java"), 1, MAIN_JAVA);
+    retry("intellij-server ready", Duration::from_secs(120), || {
+        let s = last_status(&events, "intellij-server");
+        if let Some((ServerStatus::Crashed | ServerStatus::Missing | ServerStatus::Misconfigured, msg)) = &s {
+            panic!("intellij-server failed: {msg:?}");
+        }
+        async move { matches!(s, Some((ServerStatus::Ready | ServerStatus::Busy, _))).then_some(()) }
+    })
+    .await;
+    let servers = mgr.servers();
+    assert_eq!(servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["intellij-server"]);
+    assert_eq!(servers[0].root, root);
+
+    let hover = retry("hover", Duration::from_secs(300), || {
+        let mgr = mgr.clone();
+        async move { mgr.hover(doc, Pos::new(9, 17), Default::default()).await.ok().flatten() }
+    })
+    .await;
+    assert!(hover.contents.value.contains("add"), "{}", hover.contents.value);
+
+    let defs = retry("definition", Duration::from_secs(60), || {
+        let mgr = mgr.clone();
+        async move { mgr.goto(doc, Pos::new(9, 17), GotoKind::Definition).await.ok().filter(|d| !d.is_empty()) }
+    })
+    .await;
+    assert_eq!(defs[0].path, main);
+    assert_eq!(defs[0].range.start.line, 4);
+
+    mgr.did_change(
+        doc,
+        2,
+        &[AppliedChange { range: Range::point(Pos::new(10, 0)), text: "        \"x\".\n".into() }],
+        &|| unreachable!(),
+    );
+    retry("completion", Duration::from_secs(60), || {
+        let mgr = mgr.clone();
+        async move {
+            let list = mgr.completion(doc, Pos::new(10, 12), Some(".".into()), Default::default()).await.ok()?;
+            list.items.iter().any(|i| i.label.starts_with("length")).then_some(())
+        }
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(30), mgr.shutdown_all()).await.unwrap();
+}
