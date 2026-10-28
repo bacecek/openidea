@@ -143,6 +143,8 @@ export const STATUS_LABEL: Record<ServerStatus, string> = {
   misconfigured: "Not started",
 };
 
+const SERVING: ServerStatus[] = ["starting", "ready", "busy"];
+
 /**
  * A missing server whose languages another installed one serves (vtsls missing,
  * typescript-language-server running as its fallback) is not a problem.
@@ -150,7 +152,9 @@ export const STATUS_LABEL: Record<ServerStatus, string> = {
 export function servedByOther(server: ServerEntry, servers: readonly ServerEntry[]): boolean {
   return (
     server.languages.length > 0 &&
-    server.languages.every((l) => servers.some((o) => o !== server && o.status !== "missing" && o.languages.includes(l)))
+    server.languages.every((l) =>
+      servers.some((o) => o !== server && SERVING.includes(o.status) && o.languages.includes(l)),
+    )
   );
 }
 

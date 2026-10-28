@@ -20,7 +20,7 @@ vi.mock("@/platform/ipc", async (importOriginal) => {
 
 const { emitLocalIdeEvent } = await import("@/platform/ipc");
 const { useProject } = await import("@/platform/project");
-const { installServerEvents, serversSummary, useServers } = await import("./servers");
+const { installServerEvents, servedByOther, serversSummary, useServers } = await import("./servers");
 
 describe("server status", () => {
   let dispose = () => {};
@@ -83,6 +83,12 @@ describe("serversSummary", () => {
   it("doesn't flag a missing server whose languages another one serves", () => {
     expect(serversSummary([entry(1, "vtsls", "missing"), entry(2, "typescript-language-server", "ready")])?.tone).toBe("ok");
     expect(serversSummary([entry(1, "vtsls", "missing")])?.tone).toBe("error");
+  });
+  it("doesn't count a crashed or stopped server as serving", () => {
+    const vtsls = entry(1, "vtsls", "missing");
+    for (const status of ["crashed", "misconfigured", "stopped"] as const)
+      expect(servedByOther(vtsls, [vtsls, entry(2, "typescript-language-server", status)])).toBe(false);
+    expect(servedByOther(vtsls, [vtsls, entry(2, "typescript-language-server", "busy")])).toBe(true);
   });
   it("doesn't count stopped servers next to running ones", () => {
     const text = (...servers: ReturnType<typeof entry>[]) => serversSummary(servers)?.text;
