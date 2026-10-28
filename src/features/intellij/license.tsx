@@ -192,7 +192,9 @@ function LicenseBody({ view }: { view: IntellijLicenseView }) {
       <div className={styles.form}>
         {license && (
           <>
-            <Row label="Product:">{license.product}</Row>
+            <Row label="Product:">
+              {license.product === INTELLIJ_SERVER ? tx("IntelliJ IDEA (Java and Kotlin)") : license.product}
+            </Row>
             <Row label="Source:">{tx(SOURCES[license.source] ?? license.source)}</Row>
             {license.licensedTo && <Row label="Licensed to:">{license.licensedTo}</Row>}
             {(through || days != null) && (
@@ -230,7 +232,7 @@ async function openLicenseDialog(server: ServerId) {
     title: "IntelliJ License",
     body: <LicenseBody view={view} />,
     icon: "info",
-    width: 480,
+    width: buttons.length > 4 ? 720 : 600,
     cancel: false,
     buttons,
   }).finally(() => (dialogOpen = false));

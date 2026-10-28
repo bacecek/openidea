@@ -4587,5 +4587,6 @@
   "Enter a URL that starts with http:// or https://": "请输入以 http:// 或 https:// 开头的 URL",
   "Couldn't check the activation code": "无法检查激活码",
   "Use jdtls and kotlin-lsp": "使用 jdtls 和 kotlin-lsp",
-  "Couldn't switch to jdtls and kotlin-lsp": "无法切换到 jdtls 和 kotlin-lsp"
+  "Couldn't switch to jdtls and kotlin-lsp": "无法切换到 jdtls 和 kotlin-lsp",
+  "IntelliJ IDEA (Java and Kotlin)": "IntelliJ IDEA（Java 和 Kotlin）"
 }

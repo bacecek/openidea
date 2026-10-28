@@ -715,3 +715,26 @@ describe("Switching to jdtls and kotlin-lsp", () => {
     expect(written()).toEqual(declined);
   });
 });
+
+describe("IntelliJ license dialog layout", () => {
+  const signedIn = { authenticationStatus: "Authenticated", displayName: "Jane", email: null, errorMessage: null };
+
+  it("is wide enough for its buttons and names the server's product", async () => {
+    push(view("licensed", { license: license("subscription", { product: "intellij-server" }), account: signedIn }));
+    await executeAction("intellij.license");
+    await settle();
+    expect(within(dialog()).getAllByRole("button", { name: /License…|Remove License|Sign Out|Close/ })).toHaveLength(4);
+    expect(dialog().style.width).toBe("600px");
+    expect(dialog()).toHaveTextContent("IntelliJ IDEA (Java and Kotlin)");
+    expect(dialog()).not.toHaveTextContent("intellij-server");
+    await click("Close");
+
+    push(view("parked", { license: license("subscription", { status: "Expired" }), account: signedIn }));
+    await executeAction("intellij.license");
+    await settle();
+    for (const name of ["Activate…", "Remove License", "Use jdtls and kotlin-lsp", "Sign Out", "Close"])
+      expect(within(dialog()).getByRole("button", { name })).toBeInTheDocument();
+    expect(dialog().style.width).toBe("720px");
+    expect(dialog()).toHaveTextContent("IntelliJ IDEA Ultimate");
+  });
+});
