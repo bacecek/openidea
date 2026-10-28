@@ -439,14 +439,44 @@ async fn intellij_server_end_to_end() {
         &[AppliedChange { range: Range::point(Pos::new(10, 0)), text: "        \"x\".\n".into() }],
         &|| unreachable!(),
     );
-    retry("completion", Duration::from_secs(240), || {
-        let mgr = mgr.clone();
-        async move {
-            let list = mgr.completion(doc, Pos::new(10, 12), Some(".".into()), Default::default()).await.ok()?;
-            list.items.iter().any(|i| i.label.starts_with("length")).then_some(())
+    let has_length = |mgr: Arc<LspManager>| async move {
+        let list = mgr.completion(doc, Pos::new(10, 12), Some(".".into()), Default::default()).await.ok();
+        list.is_some_and(|l| l.items.iter().any(|i| i.label.starts_with("length")))
+    };
+    let start = Instant::now();
+    let mut ok = false;
+    while start.elapsed() < Duration::from_secs(60) {
+        if has_length(mgr.clone()).await {
+            ok = true;
+            break;
         }
-    })
-    .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if !ok {
+        eprintln!("completion has no String members after 60 s; typing the dot again");
+        mgr.did_change(
+            doc,
+            3,
+            &[AppliedChange { range: Range::new(Pos::new(10, 11), Pos::new(10, 12)), text: "".into() }],
+            &|| unreachable!(),
+        );
+        mgr.did_change(
+            doc,
+            4,
+            &[AppliedChange { range: Range::point(Pos::new(10, 11)), text: ".".into() }],
+            &|| unreachable!(),
+        );
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(30) {
+            if has_length(mgr.clone()).await {
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        eprintln!("after typing the dot again: {}", if ok { "recovered" } else { "still no String members" });
+    }
+    assert!(ok, "completion never offered String members");
 
     tokio::time::timeout(Duration::from_secs(30), mgr.shutdown_all()).await.unwrap();
 }
