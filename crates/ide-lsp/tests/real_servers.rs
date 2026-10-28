@@ -379,12 +379,14 @@ async fn intellij_server_end_to_end() {
     let main = src.join("Main.java");
     std::fs::write(&main, MAIN_JAVA).unwrap();
 
+    let system = tempfile::tempdir().unwrap();
     let registry = LanguageRegistry::load(None).unwrap();
     let mut configs = Vec::new();
     for id in ["java", "kotlin"] {
         let mut l = registry.get(&LanguageId::new(id)).unwrap();
         assert_eq!(l.language_servers[0].name, "intellij-server");
         l.language_servers[0].command = bin.clone();
+        l.language_servers[0].args.extend(["--system-path".into(), system.path().to_string_lossy().into_owned()]);
         configs.push(l);
     }
     let (mgr, events) = manager(&root, LanguageRegistry::from_configs(configs));
