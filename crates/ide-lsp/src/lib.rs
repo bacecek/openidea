@@ -328,7 +328,7 @@ impl LspManager {
                 continue;
             }
             let server = self.server_for(sc, language, path);
-            available_before |= server.status() != ide_core::event::ServerStatus::Missing;
+            available_before |= server.status() != ide_core::event::ServerStatus::Missing && !server.gave_up();
             out.push(server);
         }
         out
@@ -427,6 +427,7 @@ impl LspManager {
                 tracing::warn!("{}: {message}", server.name);
                 if server.finish_start(generation, Conn::Failed) {
                     server.set_status(&self.sink, ide_core::event::ServerStatus::Misconfigured, Some(message));
+                    self.attach_fallbacks();
                 }
                 return;
             }
@@ -434,6 +435,7 @@ impl LspManager {
                 tracing::warn!("{}: {message}", server.name);
                 if server.finish_start(generation, Conn::Failed) {
                     server.set_status(&self.sink, ide_core::event::ServerStatus::Crashed, Some(message));
+                    self.attach_fallbacks();
                 }
                 return;
             }
@@ -524,6 +526,7 @@ impl LspManager {
         if let Some(message) = intellij::exit_message(&server.name, code, &tail) {
             server.give_up(generation);
             server.set_status(&self.sink, ServerStatus::Crashed, Some(message));
+            self.attach_fallbacks();
             return;
         }
         let cfg = server.effective_config();
@@ -551,6 +554,7 @@ impl LspManager {
                     ServerStatus::Crashed,
                     Some(format!("{message}\nCrashed repeatedly; restart it manually.")),
                 );
+                self.attach_fallbacks();
             }
         }
     }
@@ -2051,6 +2055,7 @@ impl LspManager {
         self.stop_instance(&s, false).await;
         s.reset_for_restart();
         self.ensure_started(&s);
+        self.detach_shadowed_fallbacks().await;
         match s.wait_ready(Duration::from_secs(60)).await {
             Some(_) => Ok(()),
             None => {

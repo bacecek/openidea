@@ -2697,3 +2697,38 @@ async fn intellij_failed_imports_are_reported() {
     let body = format!("Maven import failed\n{}\nCould not resolve dependencies", tail.join("\n"));
     assert_eq!(notified, vec![(NotifyLevel::Error, Some(body))]);
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fallback_serves_while_the_preferred_server_has_given_up() {
+    let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
+    let main = h.launcher.state("main");
+    *main.exit_code.lock() = Some(1);
+    let (_, path) = h.open("a.mk", "x");
+    let uri = uri_of(&path);
+    eventually(|| {
+        h.statuses("main").last() == Some(&ServerStatus::Crashed) && main.launches.load(Ordering::SeqCst) == 4
+    })
+    .await;
+    h.wait_status("alt", ServerStatus::Ready).await;
+    eventually(|| h.launcher.state("alt").docs.lock().contains_key(&uri)).await;
+
+    *main.exit_code.lock() = None;
+    let id = h.mgr.servers().into_iter().find(|s| s.name == "main").unwrap().id;
+    h.mgr.restart(id).await.unwrap();
+    eventually(|| main.docs.lock().contains_key(&uri)).await;
+    eventually(|| h.removed("alt")).await;
+    assert!(!h.launcher.state("alt").notified("textDocument/didClose").is_empty());
+    assert_eq!(h.mgr.servers().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["main"]);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fallback_serves_when_intellij_server_refuses_to_run() {
+    let h = harness_with_fallbacks(&[("intellij-server", licensing_caps()), ("alt", incremental_caps())], &["alt"]);
+    *h.launcher.state("intellij-server").exit_code.lock() = Some(11);
+    let (_, path) = h.open("a.mk", "x");
+    h.wait_status("alt", ServerStatus::Ready).await;
+    eventually(|| h.launcher.state("alt").docs.lock().contains_key(&uri_of(&path))).await;
+    assert_eq!(h.launcher.state("intellij-server").launches.load(Ordering::SeqCst), 1);
+}
