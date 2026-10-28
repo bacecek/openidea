@@ -26,6 +26,7 @@ import { activate as app, activateLocale as appLocale } from "./app";
 import { activate as perf } from "./perf";
 import { activate as plugins, activateSettingsPages as pluginsPages } from "./plugins";
 import { activate as tools, activateSettingsPages as toolsPages } from "./tools";
+import { activate as intellij } from "./intellij";
 import { activate as scratch } from "./scratch";
 import { activate as libraries } from "./libraries";
 import { activate as viewers } from "./viewers";
@@ -67,6 +68,7 @@ const features: Array<[string, Activate]> = [
   ["perf", perf],
   ["plugins", plugins],
   ["tools", tools],
+  ["intellij", intellij],
   ["scratch", scratch],
   ["libraries", libraries],
   ["viewers", viewers],

@@ -5,6 +5,7 @@ import { executeAction } from "@/platform/actions";
 import { isCancelled, nextRequestId } from "@/platform/ipc";
 import { notifications } from "@/workbench/contributions";
 import { upsertTask } from "@/workbench/tasks";
+import { askConsent, INTELLIJ_SERVER, intellijSettings } from "@/features/intellij/consent";
 import { toolsBackend } from "./backend";
 import { tx } from "@/platform/i18n";
 
@@ -95,6 +96,16 @@ export function toolByName(name: string): ToolInfo | undefined {
 export function installTool(name: string, opts: { notificationKey?: string } = {}): Promise<ToolInfo | null> {
   const existing = running.get(name);
   if (existing) return existing;
+  const { acceptedTerms, declined } = intellijSettings();
+  if (name === INTELLIJ_SERVER && (!acceptedTerms || declined)) {
+    return askConsent().then(
+      (answer) => (answer === "accepted" ? installTool(name, opts) : null),
+      (e) => {
+        console.warn("[intellij]", e);
+        return null;
+      },
+    );
+  }
   const display = toolByName(name)?.displayName ?? name;
   const request = nextRequestId();
   const taskId = `tools:${name}`;

@@ -1,0 +1,195 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { IntellijServerSettings, Settings } from "@/bindings";
+
+const settingsSet = vi.fn(async (_scope: string, _key: string, value: string) => ({
+  status: "ok" as const,
+  data: { languages: { java: { intellijServer: JSON.parse(value) } } } as Settings,
+}));
+vi.mock("@/platform/ipc", async (orig) => {
+  const actual = await orig<typeof import("@/platform/ipc")>();
+  return { ...actual, commands: { ...actual.commands, settingsSet } };
+});
+
+const { emitLocalIdeEvent } = await import("@/platform/ipc");
+const { useProject } = await import("@/platform/project");
+const { provideNotificationService } = await import("@/workbench/contributions");
+const { MessagesHost } = await import("@/workbench/messages");
+const { MemoryToolsBackend, sampleTools, setToolsBackend } = await import("@/features/tools/backend");
+const { installTool, useTools } = await import("@/features/tools/store");
+const { installMissingServerPrompts } = await import("@/features/tools/missing");
+const { activate } = await import("../index");
+
+type ToolsBackend = InstanceType<typeof MemoryToolsBackend>;
+let backend: ToolsBackend;
+let notes: string[];
+let off: () => void;
+
+const javaTools = () => {
+  const base = { ...sampleTools()[0]!, status: "missing" as const, path: null, version: null };
+  return [
+    ...sampleTools(),
+    { ...base, name: "jdtls", displayName: "Eclipse JDT LS", command: "jdtls", languages: ["Java"] },
+    {
+      ...base,
+      name: "intellij-server",
+      displayName: "IntelliJ IDEA",
+      command: "intellij-server",
+      languages: ["Java", "Kotlin"],
+    },
+  ];
+};
+
+function decided(value: IntellijServerSettings | undefined) {
+  useProject.setState({ settings: { languages: { java: value ? { intellijServer: value } : {} } } as Settings });
+}
+
+const serverEvent = (name: string, status: "missing" | "starting" = "starting") =>
+  act(() => emitLocalIdeEvent({ type: "languageServer", server: 1, name, status, message: null }));
+
+const settle = () => act(async () => void (await new Promise((r) => setTimeout(r, 20))));
+
+beforeEach(() => {
+  notes = [];
+  provideNotificationService({ notify: (n) => void notes.push(n.title) });
+  backend = new MemoryToolsBackend(javaTools(), 1);
+  setToolsBackend(backend);
+  useTools.setState({ tools: [], loaded: false, loading: false, error: null, jobs: {}, logs: {} });
+  decided(undefined);
+  render(<MessagesHost />);
+  off = activate();
+});
+
+afterEach(async () => {
+  for (const b of screen.queryAllByRole("button", { name: "Cancel" })) await userEvent.click(b);
+  off();
+  setToolsBackend(null);
+  useProject.setState({ project: null, settings: null });
+  vi.clearAllMocks();
+});
+
+describe("IntelliJ IDEA consent", () => {
+  it("asks once when Java or Kotlin code insight starts and the user has not decided", async () => {
+    serverEvent("jdtls");
+    serverEvent("kotlin-lsp", "missing");
+    await settle();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog")).toHaveTextContent("IntelliJ IDEA for Java and Kotlin");
+  });
+
+  it("stays quiet for other languages and once the user has decided", async () => {
+    serverEvent("gopls");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    off();
+    for (const value of [{ acceptedTerms: true }, { declined: true }]) {
+      decided(value);
+      off = activate();
+      serverEvent("jdtls");
+      await settle();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      off();
+    }
+    off = () => {};
+  });
+
+  const written = () => settingsSet.mock.calls.map(([scope, key, value]) => ({ scope, key, value: JSON.parse(value) }));
+
+  it("Accept and Install stores the choice and downloads the server", async () => {
+    serverEvent("jdtls");
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "Region" }));
+    await userEvent.click(screen.getByRole("option", { name: "Americas" }));
+    await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+    await waitFor(() => expect(backend.restarted).toEqual(["intellij-server"]));
+    expect(written()).toEqual([
+      {
+        scope: "global",
+        key: "languages.java.intellijServer",
+        value: { acceptedTerms: true, declined: false, region: "americas", dataSharing: "none" },
+      },
+    ]);
+  });
+
+  it("Accept and Install skips the download when the server is already installed", async () => {
+    backend.tools = backend.tools.map((t) => (t.name === "intellij-server" ? { ...t, status: "onPath" } : t));
+    serverEvent("jdtls");
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+    await settle();
+    expect(written()).toHaveLength(1);
+    expect(backend.restarted).toEqual([]);
+  });
+
+  it("Not now declines for good, Cancel leaves the question open", async () => {
+    decided({ region: "china" });
+    serverEvent("jdtls");
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "Not now" }));
+    await settle();
+    expect(written()).toEqual([
+      { scope: "global", key: "languages.java.intellijServer", value: { region: "china", declined: true } },
+    ]);
+
+    off();
+    settingsSet.mockClear();
+    decided(undefined);
+    off = activate();
+    serverEvent("jdtls");
+    await settle();
+    await userEvent.keyboard("{Escape}");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(settingsSet).not.toHaveBeenCalled();
+    expect(backend.restarted).toEqual([]);
+  });
+
+  it("holds back the jdtls install offer until the user has answered", async () => {
+    const offPrompts = installMissingServerPrompts();
+    serverEvent("jdtls", "missing");
+    serverEvent("gopls", "missing");
+    await settle();
+    expect(notes).toEqual(["gopls is not installed"]);
+    await userEvent.click(screen.getByRole("button", { name: "Not now" }));
+    await waitFor(() => expect(notes).toEqual(["gopls is not installed", "Eclipse JDT LS is not installed"]));
+    offPrompts();
+  });
+
+  it("drops the jdtls install offer when the user accepts", async () => {
+    const offPrompts = installMissingServerPrompts();
+    serverEvent("jdtls", "missing");
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+    await waitFor(() => expect(backend.restarted).toEqual(["intellij-server"]));
+    expect(notes).not.toContain("Eclipse JDT LS is not installed");
+    offPrompts();
+  });
+
+  it("asks before installing the server from Language Servers", async () => {
+    let result: unknown = "pending";
+    void installTool("intellij-server").then((r) => (result = r));
+    await settle();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(result).toBeNull());
+    expect(backend.restarted).toEqual([]);
+
+    decided({ declined: true, region: "china" });
+    const accepted = installTool("intellij-server");
+    await settle();
+    expect(screen.getByRole("dialog")).toHaveTextContent("IntelliJ IDEA for Java and Kotlin");
+    await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+    expect((await accepted)?.status).toBe("installed");
+    expect(written().at(-1)?.value).toEqual({
+      acceptedTerms: true,
+      declined: false,
+      region: "china",
+      dataSharing: "none",
+    });
+
+    settingsSet.mockClear();
+    await installTool("intellij-server");
+    expect(settingsSet).not.toHaveBeenCalled();
+    expect(backend.restarted).toEqual(["intellij-server", "intellij-server"]);
+  });
+});
