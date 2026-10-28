@@ -123,6 +123,29 @@ pub enum IdeEvent {
         server: ServerId,
         url: String,
     },
+    LspPrompt {
+        id: u64,
+        server: ServerId,
+        prompt: LspPrompt,
+    },
+    LspPromptClosed {
+        id: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum LspPrompt {
+    MessageRequest { level: NotifyLevel, message: String, actions: Vec<String> },
+    Conflicts { title: String, conflicts: Vec<LspConflict>, continue_label: String, cancel_label: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LspConflict {
+    pub messages: Vec<String>,
+    pub path: Option<crate::IpcPath>,
+    pub range: Option<crate::Range>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]

@@ -352,6 +352,7 @@ export const commands = {
 	graceDeadline: number | null,
 	envLicense: boolean,
 } | null, IdeError>(__TAURI_INVOKE("lsp_intellij_license", { server })),
+	lspPromptReply: (id: number, answer: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("lsp_prompt_reply", { id, answer })),
 	/**  Applies a (previewed) workspace edit, e.g. after rename confirmation. */
 	applyWorkspaceEdit: (edit: WorkspaceEdit) => typedError<null, IdeError>(__TAURI_INVOKE("apply_workspace_edit", { edit })),
 	/**
@@ -3147,7 +3148,7 @@ export type IdeEvent =
 /**  A child process (`ssh`, `git`) asks for a credential; answered with `ssh_askpass_answer`. */
 { type: "askpass"; id: number; prompt: string; kind: AskpassKind } | 
 /**  Prompt `id` was answered (in any window) or gave up. */
-{ type: "askpassDone"; id: number } | { type: "intellijLicense"; server: ServerId; view: IntellijLicenseView } | { type: "openExternalUrl"; server: ServerId; url: string };
+{ type: "askpassDone"; id: number } | { type: "intellijLicense"; server: ServerId; view: IntellijLicenseView } | { type: "openExternalUrl"; server: ServerId; url: string } | { type: "lspPrompt"; id: number; server: ServerId; prompt: LspPrompt } | { type: "lspPromptClosed"; id: number };
 
 /**  An identifier-like token whose text equals the searched name. */
 export type IdentifierOccurrence = {
@@ -3807,6 +3808,14 @@ export type LogQuery = {
 	sinceMs?: number | null,
 	untilMs?: number | null,
 };
+
+export type LspConflict = {
+	messages: string[],
+	path: IpcPath | null,
+	range: Range | null,
+};
+
+export type LspPrompt = { kind: "messageRequest"; level: NotifyLevel; message: string; actions: string[] } | { kind: "conflicts"; title: string; conflicts: LspConflict[]; continueLabel: string; cancelLabel: string };
 
 export type LspRefreshKind = "inlayHints" | "semanticTokens" | "codeLens";
 

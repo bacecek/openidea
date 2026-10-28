@@ -265,6 +265,11 @@ pub fn lsp_intellij_license(host: &Host, window: &str, server: ServerId) -> IdeR
     Ok(host.project(window)?.lsp.intellij_license(server))
 }
 
+pub fn lsp_prompt_reply(host: &Host, window: &str, id: u64, answer: Option<String>) -> IdeResult<()> {
+    host.project(window)?.lsp.prompt_reply(id, answer);
+    Ok(())
+}
+
 /// Applies a (previewed) workspace edit, e.g. after rename confirmation.
 pub fn apply_workspace_edit(host: &Host, window: &str, edit: WorkspaceEdit) -> IdeResult<()> {
     let project = host.project(window)?;
@@ -375,6 +380,7 @@ pub(crate) fn register(d: &mut Dispatcher) {
         lsp_intellij_licensing(&c.host, &c.window, c.arg("server")?, c.arg("request")?, c.arg("value")?).await
     });
     d.add("lsp_intellij_license", |c| async move { lsp_intellij_license(&c.host, &c.window, c.arg("server")?) });
+    d.add("lsp_prompt_reply", |c| async move { lsp_prompt_reply(&c.host, &c.window, c.arg("id")?, c.arg("answer")?) });
     d.add("apply_workspace_edit", |c| async move { apply_workspace_edit(&c.host, &c.window, c.arg("edit")?) });
     d.add("lsp_execute_command", |c| async move {
         lsp_execute_command(&c.host, &c.window, c.arg("doc")?, c.arg("command")?).await

@@ -1,6 +1,6 @@
 //! Protocol tests against in-memory mock language servers.
 
-use ide_core::event::ServerStatus;
+use ide_core::event::{LspConflict, LspPrompt, NotifyLevel, ServerStatus};
 use ide_core::{DocId, FileEdit, IdeEvent, LanguageId, Pos, Range, ServerId, Severity, WorkspaceEdit};
 use ide_jsonrpc::{Handler, NoopHandler, Peer};
 use ide_language::{LanguageConfig, LanguageRegistry, LanguageServerConfig};
@@ -649,11 +649,7 @@ async fn apply_edit_hook_and_server_requests() {
     let v: Value = peer.request("window/workDoneProgress/create", json!({ "token": "t" }), None).await.unwrap();
     assert_eq!(v, Value::Null);
     let v: Value = peer
-        .request(
-            "window/showMessageRequest",
-            json!({ "type": 1, "message": "boom", "actions": [{ "title": "OK" }] }),
-            None,
-        )
+        .request("window/showMessageRequest", json!({ "type": 1, "message": "boom", "actions": [] }), None)
         .await
         .unwrap();
     assert_eq!(v, Value::Null);
@@ -2178,4 +2174,159 @@ async fn a_declined_user_agreement_is_not_restarted() {
         _ => None,
     });
     assert_eq!(message.as_deref(), Some("the JetBrains User Agreement was not accepted"));
+}
+
+// ------------------------------------------------------------------ prompts
+
+fn prompts(h: &Harness) -> Vec<(u64, ServerId, LspPrompt)> {
+    h.events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::LspPrompt { id, server, prompt } => Some((*id, *server, prompt.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn closed_prompts(h: &Harness) -> Vec<u64> {
+    h.events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::LspPromptClosed { id } => Some(*id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_requests_with_actions_wait_for_the_user() {
+    let h = harness(&[("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let peer = h.launcher.state("mock").peer();
+    let params = json!({ "type": 2, "message": "Import as?", "actions": [{ "title": "Maven" }, { "title": "Gradle", "id": 7 }] });
+    let reply = tokio::spawn(async move { peer.request::<_, Value>("window/showMessageRequest", params, None).await });
+    eventually(|| !prompts(&h).is_empty()).await;
+    let (id, server, prompt) = prompts(&h).remove(0);
+    assert_eq!(server, h.mgr.servers()[0].id);
+    assert_eq!(
+        prompt,
+        LspPrompt::MessageRequest {
+            level: NotifyLevel::Warning,
+            message: "Import as?".into(),
+            actions: vec!["Maven".into(), "Gradle".into()],
+        }
+    );
+    assert!(closed_prompts(&h).is_empty());
+
+    h.mgr.prompt_reply(id, Some("Gradle".into()));
+    assert_eq!(reply.await.unwrap().unwrap(), json!({ "title": "Gradle", "id": 7 }));
+    assert_eq!(closed_prompts(&h), vec![id]);
+    h.mgr.prompt_reply(id, Some("Maven".into()));
+    assert_eq!(closed_prompts(&h), vec![id]);
+    assert!(!h.events.lock().iter().any(|e| matches!(e, IdeEvent::Notify { .. })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompts_close_when_their_server_stops() {
+    let h = harness(&[("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let peer = h.launcher.state("mock").peer();
+    let params = json!({ "type": 3, "message": "Import?", "actions": [{ "title": "Yes" }] });
+    let reply = tokio::spawn(async move { peer.request::<_, Value>("window/showMessageRequest", params, None).await });
+    eventually(|| !prompts(&h).is_empty()).await;
+    let id = prompts(&h)[0].0;
+
+    tokio::time::timeout(Duration::from_secs(5), h.mgr.restart(h.mgr.servers()[0].id)).await.unwrap().unwrap();
+    assert_eq!(closed_prompts(&h), vec![id]);
+    assert!(reply.await.unwrap().is_err());
+}
+
+fn show_conflicts(peer: Peer, uri: &str) -> tokio::task::JoinHandle<Result<Value, ide_jsonrpc::RpcError>> {
+    let params = json!({
+        "title": "Problems Detected",
+        "conflicts": [
+            { "messages": ["Method <b>run</b> is already defined"],
+              "location": { "uri": uri, "range": {"start":{"line":0,"character":6},"end":{"line":0,"character":7}} } },
+            { "messages": ["Library class", "is read-only"],
+              "location": { "uri": "jrt://java.base/String.class", "range": {"start":{"line":0,"character":0},"end":{"line":0,"character":1}} } },
+            { "messages": ["No location"] }
+        ],
+        "continueLabel": "Continue",
+        "cancelLabel": "Cancel",
+        "revealLabel": "Show",
+        "documentChangedLabel": "Changed"
+    });
+    tokio::spawn(async move { peer.request::<_, Value>("intellij/showConflicts", params, None).await })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn intellij_conflicts_ask_whether_to_continue() {
+    let mut caps = incremental_caps();
+    caps["positionEncoding"] = json!("utf-8");
+    let h = harness(&[("intellij-server", caps), ("mock", incremental_caps())]);
+    let (_, path) = h.open("a.mk", "é😀x = 1\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let ij = h.launcher.state("intellij-server").peer();
+    let uri = uri_of(&path);
+
+    let reply = show_conflicts(ij.clone(), &uri);
+    eventually(|| prompts(&h).len() == 1).await;
+    let (id, server, prompt) = prompts(&h).remove(0);
+    assert_eq!(server, h.mgr.servers().into_iter().find(|i| i.name == "intellij-server").unwrap().id);
+    assert_eq!(
+        prompt,
+        LspPrompt::Conflicts {
+            title: "Problems Detected".into(),
+            conflicts: vec![
+                LspConflict {
+                    messages: vec!["Method <b>run</b> is already defined".into()],
+                    path: Some(path.clone().into()),
+                    range: Some(rng(0, 3, 0, 4)),
+                },
+                LspConflict { messages: vec!["Library class".into(), "is read-only".into()], path: None, range: None },
+                LspConflict { messages: vec!["No location".into()], path: None, range: None },
+            ],
+            continue_label: "Continue".into(),
+            cancel_label: "Cancel".into(),
+        }
+    );
+    h.mgr.prompt_reply(id, Some("continue".into()));
+    assert_eq!(reply.await.unwrap().unwrap(), json!({ "decision": "continue" }));
+
+    let reply = show_conflicts(ij, &uri);
+    eventually(|| prompts(&h).len() == 2).await;
+    h.mgr.prompt_reply(prompts(&h)[1].0, None);
+    assert_eq!(reply.await.unwrap().unwrap(), json!({ "decision": "cancel" }));
+    assert_eq!(closed_prompts(&h).len(), 2);
+
+    let mock = h.launcher.state("mock").peer();
+    assert!(show_conflicts(mock, &uri).await.unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_a_document_cancels_pending_conflicts() {
+    let h = harness(&[("intellij-server", incremental_caps())]);
+    let (doc, path) = h.open("a.mk", "x\n");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let peer = h.launcher.state("intellij-server").peer();
+    let question = json!({ "type": 3, "message": "Import?", "actions": [{ "title": "Yes" }] });
+    let other = peer.clone();
+    let asked =
+        tokio::spawn(async move { other.request::<_, Value>("window/showMessageRequest", question, None).await });
+    let reply = show_conflicts(peer, &uri_of(&path));
+    eventually(|| prompts(&h).len() == 2).await;
+    let conflicts = prompts(&h).into_iter().find(|p| matches!(p.2, LspPrompt::Conflicts { .. })).unwrap().0;
+
+    h.mgr.did_change(doc, 2, &[change(rng(0, 1, 0, 1), "y")], &|| unreachable!());
+    assert_eq!(reply.await.unwrap().unwrap(), json!({ "decision": "cancel" }));
+    assert_eq!(closed_prompts(&h), vec![conflicts]);
+
+    let question = prompts(&h).into_iter().find(|p| p.0 != conflicts).unwrap().0;
+    h.mgr.prompt_reply(question, Some("Yes".into()));
+    assert_eq!(asked.await.unwrap().unwrap(), json!({ "title": "Yes" }));
 }

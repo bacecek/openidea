@@ -5,7 +5,7 @@ use crate::convert;
 use crate::server::{Progress, Server};
 use crate::text::Encoding;
 use crate::uri::uri_to_path;
-use ide_core::event::{LspRefreshKind, NotifyLevel};
+use ide_core::event::{LspConflict, LspPrompt, LspRefreshKind, NotifyLevel};
 use ide_core::{IdeEvent, TaskId};
 use ide_jsonrpc::{Handler, codes};
 use lsp_types as lsp;
@@ -124,6 +124,57 @@ impl ClientHandler {
         mgr.sink().emit(IdeEvent::Notify { level, title: self.server.name.clone(), body: Some(text) });
     }
 
+    fn message_request(&self, mgr: &LspManager, params: &Value) -> Value {
+        let Some(actions) = params.get("actions").and_then(Value::as_array).filter(|a| !a.is_empty()) else {
+            self.show_message(mgr, params);
+            return Value::Null;
+        };
+        let title = |a: &Value| a.get("title").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let level = match params.get("type").and_then(Value::as_u64) {
+            Some(1) => NotifyLevel::Error,
+            Some(2) => NotifyLevel::Warning,
+            _ => NotifyLevel::Info,
+        };
+        let prompt = LspPrompt::MessageRequest {
+            level,
+            message: params.get("message").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            actions: actions.iter().map(title).collect(),
+        };
+        mgr.ask(self.server.id, prompt)
+            .and_then(|chosen| actions.iter().find(|a| title(a) == chosen).cloned())
+            .unwrap_or(Value::Null)
+    }
+
+    fn conflicts(&self, mgr: &LspManager, params: &Value) -> Value {
+        let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        let conflicts = {
+            let conv = mgr.conv(self.encoding());
+            let list = params.get("conflicts").and_then(Value::as_array).into_iter().flatten();
+            list.map(|c| {
+                let messages = c.get("messages").and_then(Value::as_array).into_iter().flatten();
+                let location = c.get("location").and_then(|l| serde_json::from_value::<lsp::Location>(l.clone()).ok());
+                let target = location.and_then(|l| Some((uri_to_path(l.uri.as_str())?, l.range)));
+                LspConflict {
+                    messages: messages.filter_map(Value::as_str).map(str::to_owned).collect(),
+                    range: target.as_ref().map(|(path, range)| conv.range(path, *range)),
+                    path: target.map(|(path, _)| path.into()),
+                }
+            })
+            .collect()
+        };
+        let prompt = LspPrompt::Conflicts {
+            title: text(params, "title"),
+            conflicts,
+            continue_label: text(params, "continueLabel"),
+            cancel_label: text(params, "cancelLabel"),
+        };
+        let decision = match mgr.ask(self.server.id, prompt).as_deref() {
+            Some("continue") => "continue",
+            _ => "cancel",
+        };
+        json!({ "decision": decision })
+    }
+
     fn configuration(&self, params: &Value) -> Value {
         let options = all_settings(&self.server.effective_config());
         let items = params.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -213,9 +264,9 @@ impl Handler for ClientHandler {
         };
         match method {
             "window/workDoneProgress/create" => Ok(Value::Null),
-            "window/showMessageRequest" => {
-                self.show_message(&mgr, &params);
-                Ok(Value::Null)
+            "window/showMessageRequest" => Ok(self.message_request(&mgr, &params)),
+            "intellij/showConflicts" if self.server.name == crate::intellij::SERVER => {
+                Ok(self.conflicts(&mgr, &params))
             }
             "window/showDocument" => match crate::intellij::external_url(&self.server.name, &params) {
                 Some(url) => {

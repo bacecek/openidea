@@ -178,6 +178,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         lsp::lsp_restart,
         lsp::lsp_intellij_licensing,
         lsp::lsp_intellij_license,
+        lsp::lsp_prompt_reply,
         lsp::apply_workspace_edit,
         lsp::lsp_execute_command,
         vcs::vcs_status,

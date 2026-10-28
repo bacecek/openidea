@@ -345,6 +345,12 @@ pub fn lsp_intellij_license(
     ide_host::ops::lsp::lsp_intellij_license(&state.host, window.label(), server)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn lsp_prompt_reply(window: Window, state: State<'_, AppState>, id: u64, answer: Option<String>) -> IdeResult<()> {
+    ide_host::ops::lsp::lsp_prompt_reply(&state.host, window.label(), id, answer)
+}
+
 /// Applies a (previewed) workspace edit, e.g. after rename confirmation.
 #[tauri::command]
 #[specta::specta]

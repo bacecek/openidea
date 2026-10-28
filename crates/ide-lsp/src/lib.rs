@@ -14,6 +14,7 @@ mod inspect;
 mod intellij;
 pub mod jdtls;
 mod launch;
+mod prompt;
 mod scope;
 mod server;
 mod tcp;
@@ -166,6 +167,7 @@ pub struct LspManager {
     /// Contents fetched for virtual URIs.
     virtual_docs: Mutex<HashMap<String, VirtualDocument>>,
     intellij_licenses: Mutex<HashMap<ide_core::ServerId, intellij::License>>,
+    prompts: Mutex<HashMap<u64, prompt::Pending>>,
 }
 
 /// Fetched virtual documents kept before the cache is reset.
@@ -283,6 +285,7 @@ impl LspManager {
             virtual_origins: Mutex::new(HashMap::new()),
             virtual_docs: Mutex::new(HashMap::new()),
             intellij_licenses: Mutex::new(HashMap::new()),
+            prompts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -547,6 +550,7 @@ impl LspManager {
 
     /// Ends progress tasks and withdraws diagnostics of a dead instance.
     fn clear_server_state(&self, server: &Server) {
+        self.close_server_prompts(server.id);
         for (id, title) in server.take_progress() {
             self.sink.emit(ide_core::IdeEvent::Task { id, title, message: None, fraction: None, done: true });
         }
@@ -686,6 +690,7 @@ impl LspManager {
         let mut docs = self.docs.lock();
         let Some(d) = docs.get_mut(&doc) else { return };
         d.version = version as i32;
+        self.close_conflict_prompts(&d.servers.iter().map(|a| a.server.id).collect::<Vec<_>>());
 
         // Servers that have this document open on their current instance.
         let targets: Vec<(Arc<Server>, Running, SyncKind, Encoding)> = d
