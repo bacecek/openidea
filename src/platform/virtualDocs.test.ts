@@ -1,6 +1,24 @@
-import { describe, expect, it } from "vitest";
-import { isVirtualUri, virtualContainer, virtualName, virtualParent } from "./virtualDocs";
+import { describe, expect, it, vi } from "vitest";
+import { isVirtualUri, virtualContainer, virtualDocument, virtualName, virtualParent } from "./virtualDocs";
 import { basename, dirname, relativeDir, relativePath } from "./project";
+
+const lspVirtualDocument = vi.hoisted(() =>
+  vi.fn(async (uri: string) => ({
+    status: "ok" as const,
+    data: {
+      uri,
+      text: "",
+      languageId: "java",
+      title: "Strings.class",
+      description: "/Users/me/My Libs/guava-33.jar",
+      decompiled: true,
+    },
+  })),
+);
+vi.mock("./ipc", async (orig) => {
+  const actual = await orig<typeof import("./ipc")>();
+  return { ...actual, commands: { ...actual.commands, lspVirtualDocument } };
+});
 
 const JDT =
   "jdt://contents/spring-boot-4.1.1.jar/org.springframework.boot/SpringApplication.class?=demo/%5C/m2%5C/spring-boot-4.1.1.jar%3Corg.springframework.boot%28SpringApplication.class";
@@ -27,5 +45,12 @@ describe("virtual document URIs", () => {
     expect(relativePath("/p", JDT)).toBe("spring-boot-4.1.1.jar › org.springframework.boot › SpringApplication.class");
     expect(relativeDir("/p", JDT)).toBe("spring-boot-4.1.1.jar › org.springframework.boot");
     expect(relativePath("/p", "/p/src/A.java")).toBe("src/A.java");
+  });
+
+  it("labels intellij-server library sources with the server's description", async () => {
+    const jar = "jar:file:///Users/me/My%20Libs/guava-33.jar!/com/google/common/base/Strings.class";
+    await virtualDocument(jar);
+    expect(relativePath("/p", jar)).toBe("/Users/me/My Libs/guava-33.jar › Strings.class");
+    expect(relativeDir("/p", jar)).toBe("/Users/me/My Libs/guava-33.jar");
   });
 });

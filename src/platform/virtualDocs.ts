@@ -36,6 +36,8 @@ export function virtualParent(uri: string): string {
  */
 export function virtualContainer(uri: string): string {
   const scheme = uri.slice(0, uri.indexOf(":"));
+  const described = (scheme === "jar" || scheme === "jrt") && descriptions.get(uri);
+  if (described) return described;
   const rest = uri.replace(/^[^:]+:(\/\/)?/, "").split(/[?#]/)[0]!;
   const segs = rest.split("/").filter(Boolean).map((s) => {
     try {
@@ -50,13 +52,17 @@ export function virtualContainer(uri: string): string {
 }
 
 const cache = new Map<string, Promise<VirtualDocument>>();
+const descriptions = new Map<string, string>();
 
 /** Contents of a virtual document (cached; failures are retried on the next call). */
 export function virtualDocument(uri: string): Promise<VirtualDocument> {
   let p = cache.get(uri);
   if (!p) {
     p = call(commands.lspVirtualDocument(uri));
-    p.catch(() => cache.delete(uri));
+    p.then(
+      (vd) => void (vd.description && descriptions.set(uri, vd.description)),
+      () => cache.delete(uri),
+    );
     cache.set(uri, p);
   }
   return p;
@@ -65,4 +71,5 @@ export function virtualDocument(uri: string): Promise<VirtualDocument> {
 /** Test hook. */
 export function _clearVirtualDocuments() {
   cache.clear();
+  descriptions.clear();
 }
