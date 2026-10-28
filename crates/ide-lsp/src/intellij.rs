@@ -19,6 +19,9 @@ pub(crate) const SERVER: &str = "intellij-server";
 
 const ENV_LICENSE: [&str; 3] = ["INTELLIJ_SERVER_LICENSE", "INTELLIJ_SERVER_LICENSE_FILE", "JETBRAINS_LICENSE_SERVER"];
 
+const IMPORT_LOG_LINES: usize = 200;
+const FAILED_IMPORT_LINES: usize = 20;
+
 pub(crate) const EDITOR_COMMANDS: [&str; 3] =
     ["editor.action.rename", "editor.action.triggerSuggest", "editor.action.triggerParameterHints"];
 
@@ -163,6 +166,15 @@ pub(crate) fn external_url<'a>(server: &str, params: &'a Value) -> Option<&'a st
     (lower.starts_with("https://") || lower.starts_with("http://")).then_some(uri)
 }
 
+pub(crate) fn request_timeout(server: &str, method: &str) -> Duration {
+    match method {
+        "workspace/executeCommand" | "textDocument/rename" | "workspace/willRenameFiles" if server == SERVER => {
+            crate::prompt::PROMPT_TIMEOUT
+        }
+        _ => crate::LONG_TIMEOUT,
+    }
+}
+
 pub(crate) fn exit_message(server: &str, code: Option<i32>, tail: &str) -> Option<String> {
     if server != SERVER {
         return None;
@@ -206,10 +218,26 @@ impl LspManager {
                     Some(2 | 3) => tracing::info!("[{}] {message}", server.name),
                     _ => tracing::debug!("[{}] {message}", server.name),
                 }
-                if params.get("failed") == Some(&Value::Bool(true)) {
+                let tail: Option<Vec<String>> = {
+                    let mut logs = self.intellij_import_logs.lock();
+                    let log = logs.entry(server.id).or_default();
+                    if params.get("started") == Some(&Value::Bool(true)) {
+                        log.clear();
+                    }
+                    if !message.is_empty() {
+                        if log.len() == IMPORT_LOG_LINES {
+                            log.pop_front();
+                        }
+                        log.push_back(message.to_owned());
+                    }
+                    let failed = params.get("failed") == Some(&Value::Bool(true));
+                    failed.then(|| log.iter().skip(log.len().saturating_sub(FAILED_IMPORT_LINES)).cloned().collect())
+                };
+                if let Some(tail) = tail {
                     let tool = params.get("tool").and_then(Value::as_str).unwrap_or("Build");
-                    let body = Some(format!("{tool} import failed"));
-                    self.sink.emit(IdeEvent::Notify { level: NotifyLevel::Error, title: server.name.clone(), body });
+                    let body = [format!("{tool} import failed")].into_iter().chain(tail).collect::<Vec<_>>().join("\n");
+                    let title = server.name.clone();
+                    self.sink.emit(IdeEvent::Notify { level: NotifyLevel::Error, title, body: Some(body) });
                 }
             }
             "intellij/workspaceImportState" | "intellij/workspaceImportStatus" | "intellij/ready-for-test" => {}
@@ -247,7 +275,8 @@ impl LspManager {
             let t = Target { server, run };
             let mgr = me.clone();
             me.runtime.spawn(async move {
-                let sent = mgr.call::<_, Value>(&t, "workspace/executeCommand", command, None, crate::LONG_TIMEOUT);
+                let timeout = request_timeout(&t.server.name, "workspace/executeCommand");
+                let sent = mgr.call::<_, Value>(&t, "workspace/executeCommand", command, None, timeout);
                 if let Err(e) = sent.await {
                     tracing::warn!("{}: chosen action: {e}", t.server.name);
                 }
@@ -390,6 +419,16 @@ impl LspManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refactoring_requests_wait_for_the_user() {
+        let long = Duration::from_secs(30);
+        for method in ["workspace/executeCommand", "textDocument/rename", "workspace/willRenameFiles"] {
+            assert_eq!(request_timeout(SERVER, method), Duration::from_secs(600), "{method}");
+            assert_eq!(request_timeout("jdtls", method), long, "{method}");
+        }
+        assert_eq!(request_timeout(SERVER, "textDocument/references"), long);
+    }
 
     #[test]
     fn grace_deadline_is_dropped_while_licensed() {

@@ -2673,8 +2673,12 @@ async fn intellij_failed_imports_are_reported() {
         }
         peer.notify("intellij/importLog", line).unwrap();
     };
+    log(json!({ "tool": "Gradle", "started": true, "message": "Gradle: importing /q" }));
+    log(json!({ "message": "stale" }));
     log(json!({ "tool": "Maven", "started": true, "message": "Maven: importing /p" }));
-    log(json!({ "type": 2, "message": "[ERROR] Could not resolve dependencies" }));
+    for i in 0..25 {
+        log(json!({ "type": 2, "message": format!("[ERROR] line {i}") }));
+    }
     log(json!({ "type": 1, "tool": "Maven", "failed": true, "message": "Could not resolve dependencies" }));
     log(json!({ "tool": "Gradle", "started": true }));
     log(json!({ "succeeded": true, "message": "Workspace imported successfully" }));
@@ -2689,5 +2693,7 @@ async fn intellij_failed_imports_are_reported() {
             _ => None,
         })
         .collect();
-    assert_eq!(notified, vec![(NotifyLevel::Error, Some("Maven import failed".to_owned()))]);
+    let tail: Vec<String> = (6..25).map(|i| format!("[ERROR] line {i}")).collect();
+    let body = format!("Maven import failed\n{}\nCould not resolve dependencies", tail.join("\n"));
+    assert_eq!(notified, vec![(NotifyLevel::Error, Some(body))]);
 }

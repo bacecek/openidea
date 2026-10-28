@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(600);
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 

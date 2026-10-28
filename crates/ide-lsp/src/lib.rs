@@ -167,6 +167,7 @@ pub struct LspManager {
     /// Contents fetched for virtual URIs.
     virtual_docs: Mutex<HashMap<String, VirtualDocument>>,
     intellij_licenses: Mutex<HashMap<ide_core::ServerId, intellij::License>>,
+    intellij_import_logs: Mutex<HashMap<ide_core::ServerId, std::collections::VecDeque<String>>>,
     prompts: Mutex<HashMap<u64, prompt::Pending>>,
 }
 
@@ -290,6 +291,7 @@ impl LspManager {
             virtual_origins: Mutex::new(HashMap::new()),
             virtual_docs: Mutex::new(HashMap::new()),
             intellij_licenses: Mutex::new(HashMap::new()),
+            intellij_import_logs: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
         })
     }
@@ -556,6 +558,7 @@ impl LspManager {
     /// Ends progress tasks and withdraws diagnostics of a dead instance.
     fn clear_server_state(&self, server: &Server) {
         self.close_server_prompts(server.id);
+        self.intellij_import_logs.lock().remove(&server.id);
         for (id, title) in server.take_progress() {
             self.sink.emit(ide_core::IdeEvent::Task { id, title, message: None, fraction: None, done: true });
         }
@@ -1310,7 +1313,8 @@ impl LspManager {
             .first()
             .ok_or_else(|| IdeError::unavailable(format!("no language server provides command `{name}`")))?;
         let params = json!({ "command": command.command, "arguments": command.arguments });
-        let _: Value = self.call(t, "workspace/executeCommand", params, None, LONG_TIMEOUT).await?;
+        let timeout = intellij::request_timeout(&t.server.name, "workspace/executeCommand");
+        let _: Value = self.call(t, "workspace/executeCommand", params, None, timeout).await?;
         Ok(())
     }
 
@@ -1345,7 +1349,8 @@ impl LspManager {
         let query = || async {
             let mut params = snap.pos_params(t, pos);
             params["newName"] = json!(new_name);
-            let r: Option<lsp::WorkspaceEdit> = self.call(t, "textDocument/rename", params, None, LONG_TIMEOUT).await?;
+            let timeout = intellij::request_timeout(&t.server.name, "textDocument/rename");
+            let r: Option<lsp::WorkspaceEdit> = self.call(t, "textDocument/rename", params, None, timeout).await?;
             Ok(r.map(|e| convert::workspace_edit(&self.conv(t.enc()), e)).unwrap_or_default())
         };
         let files = |e: &WorkspaceEdit| {
@@ -1460,8 +1465,9 @@ impl LspManager {
             let Some(params) = Self::file_op_params(&t, "willRename", &moves) else { continue };
             out.servers.push(t.server.name.clone());
             let opened = self.open_for_file_op(&t, &moves);
+            let timeout = intellij::request_timeout(&t.server.name, "workspace/willRenameFiles");
             let r: IdeResult<Option<lsp::WorkspaceEdit>> =
-                self.call(&t, "workspace/willRenameFiles", params, Some(&cancel), LONG_TIMEOUT).await;
+                self.call(&t, "workspace/willRenameFiles", params, Some(&cancel), timeout).await;
             drop(opened);
             match r {
                 Ok(Some(edit)) => out.edit.files.extend(convert::workspace_edit(&self.conv(t.enc()), edit).files),
