@@ -34,6 +34,9 @@ export type Consent = "accepted" | "declined" | "later";
 export const intellijSettings = (): IntellijServerSettings =>
   useProject.getState().settings?.languages?.java?.intellijServer ?? {};
 
+export const intellijEnabled = () =>
+  useProject.getState().settings?.languageServers?.[INTELLIJ_SERVER]?.enabled !== false;
+
 export function intellijUndecided(): boolean {
   const { acceptedTerms, declined } = intellijSettings();
   return !acceptedTerms && !declined;

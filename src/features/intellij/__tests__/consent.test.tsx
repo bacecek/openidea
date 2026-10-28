@@ -81,6 +81,23 @@ describe("IntelliJ IDEA consent", () => {
     expect(screen.getByRole("dialog")).toHaveTextContent("IntelliJ IDEA for Java and Kotlin");
   });
 
+  it("asks once settings load when the first Java server came before them", async () => {
+    useProject.setState({ settings: null });
+    serverEvent("jdtls");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    act(() => decided(undefined));
+    await settle();
+    expect(screen.getByRole("dialog")).toHaveTextContent("IntelliJ IDEA for Java and Kotlin");
+  });
+
+  it("doesn't ask when IntelliJ's server is turned off", async () => {
+    useProject.setState({ settings: { languageServers: { "intellij-server": { enabled: false } } } as Settings });
+    serverEvent("jdtls");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("stays quiet for other languages and once the user has decided", async () => {
     serverEvent("gopls");
     await settle();
@@ -236,11 +253,11 @@ describe("IntelliJ IDEA consent", () => {
       useServers.setState({ servers: new Map() });
     });
 
-    const intellijStatus = (status: "ready" | "crashed" | "misconfigured") =>
+    const intellijStatus = (status: "missing" | "ready" | "crashed" | "misconfigured", message: string | null = null) =>
       act(() =>
         useServers.setState({
           servers: new Map([
-            [7, { id: 7, name: "intellij-server", status, message: null, languages: ["java", "kotlin"], root: null }],
+            [7, { id: 7, name: "intellij-server", status, message, languages: ["java", "kotlin"], root: null }],
           ]),
         }),
       );
@@ -282,8 +299,33 @@ describe("IntelliJ IDEA consent", () => {
       serverEvent("jdtls", "missing");
       await settle();
       expect(notes).toEqual([]);
+      intellijStatus("crashed", "intellij-server exited with code 1\nRestarting…");
+      await settle();
+      expect(notes).toEqual([]);
+      intellijStatus("crashed", "intellij-server exited with code 1\nCrashed repeatedly; restart it manually.");
+      await waitFor(() => expect(notes).toEqual([jdtlsOffer]));
+    });
+
+    it("offers jdtls when IntelliJ's server can't start", async () => {
+      installed();
+      decided({ acceptedTerms: true });
+      intellijStatus("ready");
+      serverEvent("jdtls", "missing");
+      await settle();
       intellijStatus("misconfigured");
       await waitFor(() => expect(notes).toEqual([jdtlsOffer]));
+    });
+
+    it("keeps the offer back while the downloaded server starts", async () => {
+      intellijStatus("missing");
+      serverEvent("jdtls", "missing");
+      await settle();
+      await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+      await waitFor(() => expect(notes).toContain("IntelliJ IDEA installed"));
+      await settle();
+      intellijStatus("ready");
+      await settle();
+      expect(notes).toEqual(["IntelliJ IDEA installed"]);
     });
 
     it("offers jdtls when IntelliJ's server is turned off", async () => {

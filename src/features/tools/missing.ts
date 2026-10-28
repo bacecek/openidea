@@ -7,26 +7,28 @@
 import { executeAction } from "@/platform/actions";
 import { onIdeEvent } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
-import type { ServerStatus } from "@/bindings";
-import { useServers } from "@/features/code-insight/servers";
-import { INTELLIJ_FALLBACKS, INTELLIJ_SERVER, intellijSettings, useConsentPrompt } from "@/features/intellij/consent";
+import { useServers, type ServerEntry } from "@/features/code-insight/servers";
+import {
+  INTELLIJ_FALLBACKS,
+  INTELLIJ_SERVER,
+  intellijEnabled,
+  intellijSettings,
+  useConsentPrompt,
+} from "@/features/intellij/consent";
 import { notifications } from "@/workbench/contributions";
 import { installTool, refreshTools, SETTINGS_PAGE_ID, toolByName, useTools } from "./store";
 import { tx } from "@/platform/i18n";
 
 export const missingKey = (name: string) => `lsp-missing-${name}`;
 
-const NOT_SERVING: ServerStatus[] = ["missing", "crashed", "misconfigured"];
-
-const intellijEnabled = () => useProject.getState().settings?.languageServers?.[INTELLIJ_SERVER]?.enabled !== false;
+const gaveUp = (s: ServerEntry) =>
+  s.status === "misconfigured" || (s.status === "crashed" && !s.message?.endsWith("Restarting…"));
 
 function intellijServes(): boolean {
   const { acceptedTerms, declined } = intellijSettings();
   if (!acceptedTerms || declined || !intellijEnabled() || toolByName(INTELLIJ_SERVER)?.status === "missing")
     return false;
-  return ![...useServers.getState().servers.values()].some(
-    (s) => s.name === INTELLIJ_SERVER && NOT_SERVING.includes(s.status),
-  );
+  return ![...useServers.getState().servers.values()].some((s) => s.name === INTELLIJ_SERVER && gaveUp(s));
 }
 
 function intellijOnItsWay(): boolean {
