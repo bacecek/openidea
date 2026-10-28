@@ -378,10 +378,17 @@ impl LspManager {
     }
 
     fn ensure_started(&self, server: &Arc<Server>) {
-        if self.shutting_down.load(Ordering::Acquire) || !self.servers.lock().iter().any(|s| s.id == server.id) {
+        if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
-        let Some(generation) = server.begin_start() else { return };
+        let generation = {
+            let servers = self.servers.lock();
+            if !servers.iter().any(|s| s.id == server.id) {
+                return;
+            }
+            server.begin_start()
+        };
+        let Some(generation) = generation else { return };
         let Some(me) = self.me.upgrade() else { return };
         let server = server.clone();
         self.runtime.spawn(async move { me.run_instance(server, generation).await });
@@ -794,7 +801,17 @@ impl LspManager {
     }
 
     pub fn did_close(&self, doc: DocId) {
-        let Some(d) = self.docs.lock().remove(&doc) else { return };
+        let (d, retired) = {
+            let mut docs = self.docs.lock();
+            let Some(d) = docs.remove(&doc) else { return };
+            let retired = self.retire_shadowed(&docs, d.servers.iter().map(|a| a.server.clone()).collect());
+            (d, retired)
+        };
+        if !retired.is_empty()
+            && let Some(me) = self.me.upgrade()
+        {
+            self.runtime.spawn(async move { me.stop_retired(&retired).await });
+        }
         for a in &d.servers {
             let Some(run) = a.server.running() else { continue };
             if a.opened_gen == Some(run.generation)
@@ -1959,16 +1976,41 @@ impl LspManager {
                     }
                 }
             }
-            let in_use = |s: &Arc<Server>| docs.values().any(|d| d.servers.iter().any(|a| a.server.id == s.id));
-            detached.retain(|s| !in_use(s));
-            self.servers.lock().retain(|s| !detached.iter().any(|g| g.id == s.id));
-            detached
+            self.retire_shadowed(&docs, detached)
         };
-        for s in &retired {
+        self.stop_retired(&retired).await;
+    }
+
+    fn retire_shadowed(&self, docs: &HashMap<DocId, DocState>, candidates: Vec<Arc<Server>>) -> Vec<Arc<Server>> {
+        let mut servers = self.servers.lock();
+        let shadowed = |s: &Arc<Server>| {
+            s.languages().iter().any(|l| {
+                let configs = self.language_servers(l);
+                configs.iter().position(|c| c.name == s.name).is_some_and(|i| {
+                    configs[i].fallback
+                        && configs[..i]
+                            .iter()
+                            .any(|c| servers.iter().any(|r| r.name == c.name && r.running().is_some()))
+                })
+            })
+        };
+        let mut retired: Vec<Arc<Server>> = Vec::new();
+        for s in candidates {
+            let in_use = docs.values().any(|d| d.servers.iter().any(|a| a.server.id == s.id));
+            if !in_use && !retired.iter().any(|r| r.id == s.id) && shadowed(&s) {
+                retired.push(s);
+            }
+        }
+        servers.retain(|s| !retired.iter().any(|r| r.id == s.id));
+        retired
+    }
+
+    async fn stop_retired(&self, retired: &[Arc<Server>]) {
+        for s in retired {
             tracing::info!("{}: shadowed by a running server, stopping", s.name);
             self.stop_instance(s, true).await;
         }
-        self.announce_removed(&retired);
+        self.announce_removed(retired);
     }
 
     /// Stops and forgets the servers that none of their languages uses any more.

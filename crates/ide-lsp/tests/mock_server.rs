@@ -2950,7 +2950,7 @@ async fn concurrent_reconfigures_leave_the_document_served() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_virtual_document_keeps_the_fallback_it_was_opened_on() {
+async fn a_virtual_document_keeps_the_fallback_until_it_closes() {
     let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
     let main = h.launcher.state("main");
     let alt = h.launcher.state("alt");
@@ -2958,7 +2958,8 @@ async fn a_virtual_document_keeps_the_fallback_it_was_opened_on() {
     let (_, path) = h.open("a.mk", "x");
     h.wait_status("alt", ServerStatus::Ready).await;
     let class = "jdt://contents/x.class";
-    h.mgr.did_open_virtual(DocId::next(), class, &h.lang, 1, "class X {}");
+    let virtual_doc = DocId::next();
+    h.mgr.did_open_virtual(virtual_doc, class, &h.lang, 1, "class X {}");
     eventually(|| alt.docs.lock().contains_key(class)).await;
 
     main.missing.store(false, Ordering::SeqCst);
@@ -2967,4 +2968,9 @@ async fn a_virtual_document_keeps_the_fallback_it_was_opened_on() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(alt.docs.lock().contains_key(class));
     assert!(!h.removed("alt"));
+
+    h.mgr.did_close(virtual_doc);
+    eventually(|| h.removed("alt")).await;
+    assert_eq!(h.statuses("alt").last(), Some(&ServerStatus::Stopped));
+    assert_eq!(names(&h), ["main"]);
 }
