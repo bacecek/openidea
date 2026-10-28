@@ -433,11 +433,19 @@ async function connectLicenseServer(server: ServerId) {
     const reply = await request(server, "licenseServer/add", url);
     const status = field(reply, "status");
     if (status === "Connected") {
-      await waitForView(server, (v) => v !== before && (v.license?.source === "licenseServer" || !!refusal(v)));
+      const licensed = (v: IntellijLicenseView) =>
+        v.license?.source === "licenseServer" && v.license.status === "Valid";
+      await waitForView(server, (v) => v !== before && (licensed(v) || !!refusal(v)));
       const view = viewOf(server);
       const refused = view && refusal(view);
-      if (refused) notify("error", title, refused);
-      else activated();
+      if (view && licensed(view)) activated();
+      else if (refused) notify("error", title, refused);
+      else
+        notify(
+          "error",
+          "Couldn't confirm the license from the license server",
+          view?.licenseServer.errorMessage?.trim(),
+        );
     } else if (status === "TimedOut") notify("error", title, tx("Sign-in to the license server timed out."));
     else if (status !== "Canceled") notify("error", title, errorText(reply) || tx("Check the address and try again."));
   } catch (e) {

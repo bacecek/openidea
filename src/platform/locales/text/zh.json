@@ -4588,5 +4588,6 @@
   "Couldn't check the activation code": "无法检查激活码",
   "Use jdtls and kotlin-lsp": "使用 jdtls 和 kotlin-lsp",
   "Couldn't switch to jdtls and kotlin-lsp": "无法切换到 jdtls 和 kotlin-lsp",
-  "IntelliJ IDEA (Java and Kotlin)": "IntelliJ IDEA（Java 和 Kotlin）"
+  "IntelliJ IDEA (Java and Kotlin)": "IntelliJ IDEA（Java 和 Kotlin）",
+  "Couldn't confirm the license from the license server": "无法确认来自许可证服务器的许可证"
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IntellijActiveLicense, IntellijLicenseView } from "@/bindings";
 
@@ -736,5 +736,28 @@ describe("IntelliJ license dialog layout", () => {
       expect(within(dialog()).getByRole("button", { name })).toBeInTheDocument();
     expect(dialog().style.width).toBe("720px");
     expect(dialog()).toHaveTextContent("IntelliJ IDEA Ultimate");
+  });
+});
+
+describe("IntelliJ license server confirmation", () => {
+  it("reports an error when the license server's license does not arrive in time", async () => {
+    handle = () => ({ status: "Connected" });
+    await openChooser();
+    await choose("Use a license server");
+    const field = screen.getByRole("textbox");
+    await userEvent.clear(field);
+    await userEvent.type(field, "https://lic.example.com");
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(within(dialog()).getByRole("button", { name: "OK" }));
+      await act(async () => void (await vi.advanceTimersByTimeAsync(5_000)));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(titles()).not.toContain("IntelliJ license is active");
+    expect(notes.at(-1)).toMatchObject({
+      level: "error",
+      title: "Couldn't confirm the license from the license server",
+    });
   });
 });
