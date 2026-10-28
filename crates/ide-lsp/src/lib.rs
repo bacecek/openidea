@@ -563,6 +563,7 @@ impl LspManager {
     fn clear_server_state(&self, server: &Server) {
         self.close_server_prompts(server.id);
         self.intellij_import_logs.lock().remove(&server.id);
+        self.intellij_licenses.lock().remove(&server.id);
         for (id, title) in server.take_progress() {
             self.sink.emit(ide_core::IdeEvent::Task { id, title, message: None, fraction: None, done: true });
         }

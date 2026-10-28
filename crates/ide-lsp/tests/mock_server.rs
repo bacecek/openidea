@@ -2732,3 +2732,19 @@ async fn a_fallback_serves_when_intellij_server_refuses_to_run() {
     eventually(|| h.launcher.state("alt").docs.lock().contains_key(&uri_of(&path))).await;
     assert_eq!(h.launcher.state("intellij-server").launches.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_instance_has_no_license_view() {
+    let h = harness(&[("intellij-server", licensing_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    s.peer()
+        .notify("jetbrains/licensing/state", licensing_state(license("Valid"), "Authenticated", json!({})))
+        .unwrap();
+    let server = h.mgr.servers()[0].id;
+    eventually(|| h.mgr.intellij_license(server).is_some()).await;
+    s.peer().kill();
+    eventually(|| h.statuses("intellij-server").contains(&ServerStatus::Crashed)).await;
+    assert!(h.mgr.intellij_license(server).is_none());
+}
