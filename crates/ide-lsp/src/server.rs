@@ -265,8 +265,8 @@ impl Server {
         st.generation == generation && matches!(st.conn, Conn::Idle)
     }
 
-    pub fn gave_up(&self) -> bool {
-        matches!(self.state.lock().conn, Conn::Failed)
+    pub fn unavailable(&self) -> bool {
+        matches!(self.state.lock().conn, Conn::Missing | Conn::Failed)
     }
 
     pub fn give_up(&self, generation: u64) {

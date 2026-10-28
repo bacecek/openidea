@@ -328,7 +328,7 @@ impl LspManager {
                 continue;
             }
             let server = self.server_for(sc, language, path);
-            available_before |= server.status() != ide_core::event::ServerStatus::Missing && !server.gave_up();
+            available_before |= !server.unavailable();
             out.push(server);
         }
         out
@@ -347,16 +347,14 @@ impl LspManager {
     /// to the open documents (and start them). Also attaches servers newly
     /// enabled in settings.
     fn attach_fallbacks(&self) {
-        let open: Vec<(DocId, LanguageId, PathBuf)> =
-            self.docs.lock().iter().map(|(id, d)| (*id, d.language.clone(), d.path.clone())).collect();
-        let wanted: Vec<(DocId, Vec<Arc<Server>>)> =
-            open.into_iter().map(|(id, language, path)| (id, self.servers_for(&language, &path))).collect();
         let mut start = Vec::new();
         {
             let mut docs = self.docs.lock();
-            for (id, servers) in wanted {
-                let Some(d) = docs.get_mut(&id) else { continue };
-                for server in servers {
+            for d in docs.values_mut() {
+                if is_virtual_uri(d.uri.as_str()) {
+                    continue;
+                }
+                for server in self.servers_for(&d.language, &d.path) {
                     if d.servers.iter().any(|a| a.server.id == server.id) {
                         continue;
                     }
@@ -380,7 +378,7 @@ impl LspManager {
     }
 
     fn ensure_started(&self, server: &Arc<Server>) {
-        if self.shutting_down.load(Ordering::Acquire) {
+        if self.shutting_down.load(Ordering::Acquire) || !self.servers.lock().iter().any(|s| s.id == server.id) {
             return;
         }
         let Some(generation) = server.begin_start() else { return };
@@ -500,6 +498,7 @@ impl LspManager {
         server.announce_ready(generation);
         self.start_licensing(&server, &run);
         self.spawn_supervisor(server, generation, peer);
+        self.detach_shadowed_fallbacks().await;
     }
 
     fn spawn_supervisor(&self, server: Arc<Server>, generation: u64, peer: ide_jsonrpc::Peer) {
@@ -642,8 +641,9 @@ impl LspManager {
         if self.docs.lock().contains_key(&doc) {
             self.did_close(doc);
         }
-        let servers = self.servers_for(language, path);
-        self.attach(doc, path.to_owned(), uri::path_to_uri(path), language, version, text, servers);
+        self.attach(doc, path.to_owned(), uri::path_to_uri(path), language, version, text, || {
+            self.servers_for(language, path)
+        });
     }
 
     /// Opens a read-only virtual document (`jdt://…`) on the server that
@@ -656,11 +656,10 @@ impl LspManager {
             tracing::debug!("not a valid URI: {uri}");
             return;
         };
-        let servers = match self.origin_server(uri) {
+        self.attach(doc, PathBuf::from(uri), lsp_uri, language, version, text, || match self.origin_server(uri) {
             Some(s) => vec![s],
             None => self.servers_for(language, &self.project_root),
-        };
-        self.attach(doc, PathBuf::from(uri), lsp_uri, language, version, text, servers);
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -672,7 +671,7 @@ impl LspManager {
         language: &LanguageId,
         version: u32,
         text: &str,
-        servers: Vec<Arc<Server>>,
+        resolve: impl FnOnce() -> Vec<Arc<Server>>,
     ) {
         let mut state = DocState {
             path,
@@ -680,10 +679,12 @@ impl LspManager {
             language: language.clone(),
             version: version as i32,
             text: Arc::new(DocText::new(text)),
-            servers: servers.iter().map(|s| Attached { server: s.clone(), opened_gen: None }).collect(),
+            servers: Vec::new(),
         };
-        {
+        let servers = {
             let mut docs = self.docs.lock();
+            let servers = resolve();
+            state.servers = servers.iter().map(|s| Attached { server: s.clone(), opened_gen: None }).collect();
             let params = state.did_open_params();
             for a in &mut state.servers {
                 if let Some(run) = a.server.running() {
@@ -694,7 +695,8 @@ impl LspManager {
                 }
             }
             docs.insert(doc, state);
-        }
+            servers
+        };
         for s in &servers {
             self.ensure_started(s);
         }
@@ -1915,35 +1917,26 @@ impl LspManager {
     /// A server enabled again shadows the fallbacks attached in its place: they
     /// leave the open documents, and stop once no document uses them.
     async fn detach_shadowed_fallbacks(&self) {
-        let open: Vec<(DocId, LanguageId, PathBuf)> =
-            self.docs.lock().iter().map(|(id, d)| (*id, d.language.clone(), d.path.clone())).collect();
-        let mut shadowed: Vec<(DocId, Vec<ide_core::ServerId>)> = Vec::new();
-        for (id, language, path) in open {
-            let configs = self.language_servers(&language);
-            let wanted = self.servers_for(&language, &path);
-            let docs = self.docs.lock();
-            let Some(d) = docs.get(&id) else { continue };
-            let gone: Vec<ide_core::ServerId> = d
-                .servers
-                .iter()
-                .filter(|a| {
-                    !wanted.iter().any(|w| w.id == a.server.id)
-                        && configs.iter().any(|c| c.fallback && c.name == a.server.name)
-                })
-                .map(|a| a.server.id)
-                .collect();
-            if !gone.is_empty() {
-                shadowed.push((id, gone));
-            }
-        }
-        if shadowed.is_empty() {
-            return;
-        }
-        let mut detached: Vec<Arc<Server>> = Vec::new();
-        {
+        let retired: Vec<Arc<Server>> = {
             let mut docs = self.docs.lock();
-            for (id, gone) in shadowed {
-                let Some(d) = docs.get_mut(&id) else { continue };
+            let mut detached: Vec<Arc<Server>> = Vec::new();
+            for d in docs.values_mut() {
+                if is_virtual_uri(d.uri.as_str()) {
+                    continue;
+                }
+                let configs = self.language_servers(&d.language);
+                let shadowed = |a: &Attached| {
+                    let Some(i) = configs.iter().position(|c| c.name == a.server.name) else { return false };
+                    configs[i].fallback
+                        && configs[..i]
+                            .iter()
+                            .any(|c| d.servers.iter().any(|b| b.server.name == c.name && b.server.running().is_some()))
+                };
+                let gone: Vec<ide_core::ServerId> =
+                    d.servers.iter().filter(|a| shadowed(a)).map(|a| a.server.id).collect();
+                if gone.is_empty() {
+                    continue;
+                }
                 let (leaving, staying): (Vec<Attached>, Vec<Attached>) =
                     d.servers.drain(..).partition(|a| gone.contains(&a.server.id));
                 d.servers = staying;
@@ -1968,41 +1961,38 @@ impl LspManager {
             }
             let in_use = |s: &Arc<Server>| docs.values().any(|d| d.servers.iter().any(|a| a.server.id == s.id));
             detached.retain(|s| !in_use(s));
-        }
-        if detached.is_empty() {
-            return;
-        }
-        for s in &detached {
-            tracing::info!("{}: shadowed by an enabled server, stopping", s.name);
+            self.servers.lock().retain(|s| !detached.iter().any(|g| g.id == s.id));
+            detached
+        };
+        for s in &retired {
+            tracing::info!("{}: shadowed by a running server, stopping", s.name);
             self.stop_instance(s, true).await;
         }
-        self.forget(&detached);
+        self.announce_removed(&retired);
     }
 
     /// Stops and forgets the servers that none of their languages uses any more.
     async fn stop_unlisted(&self) {
-        let servers: Vec<Arc<Server>> = self.servers.lock().clone();
-        let unlisted: Vec<Arc<Server>> = servers
-            .into_iter()
-            .filter(|s| !s.languages().iter().any(|l| self.language_servers(l).iter().any(|c| c.name == s.name)))
-            .collect();
-        if unlisted.is_empty() {
-            return;
-        }
+        let unlisted: Vec<Arc<Server>> = {
+            let mut docs = self.docs.lock();
+            let mut servers = self.servers.lock();
+            let (unlisted, kept): (Vec<Arc<Server>>, Vec<Arc<Server>>) = servers.drain(..).partition(|s| {
+                !s.languages().iter().any(|l| self.language_servers(l).iter().any(|c| c.name == s.name))
+            });
+            *servers = kept;
+            for d in docs.values_mut() {
+                d.servers.retain(|a| !unlisted.iter().any(|u| u.id == a.server.id));
+            }
+            unlisted
+        };
         for s in &unlisted {
             tracing::info!("{}: no longer enabled, stopping", s.name);
             self.stop_instance(s, true).await;
         }
-        let gone = |s: &Arc<Server>| unlisted.iter().any(|u| u.id == s.id);
-        for d in self.docs.lock().values_mut() {
-            d.servers.retain(|a| !gone(&a.server));
-        }
-        self.forget(&unlisted);
+        self.announce_removed(&unlisted);
     }
 
-    /// Drops stopped servers from the list and tells the UI they are gone.
-    fn forget(&self, gone: &[Arc<Server>]) {
-        self.servers.lock().retain(|s| !gone.iter().any(|g| g.id == s.id));
+    fn announce_removed(&self, gone: &[Arc<Server>]) {
         for s in gone {
             self.sink.emit(ide_core::IdeEvent::LanguageServerRemoved { server: s.id });
         }
@@ -2056,7 +2046,6 @@ impl LspManager {
         self.stop_instance(&s, false).await;
         s.reset_for_restart();
         self.ensure_started(&s);
-        self.detach_shadowed_fallbacks().await;
         match s.wait_ready(Duration::from_secs(60)).await {
             Some(_) => Ok(()),
             None => {

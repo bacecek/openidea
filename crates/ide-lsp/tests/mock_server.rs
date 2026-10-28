@@ -29,6 +29,8 @@ struct MockState {
     responses: Mutex<HashMap<String, Value>>,
     errors: Mutex<HashMap<String, (i64, String)>>,
     exit_code: Mutex<Option<i32>>,
+    init_gate: Mutex<Option<Arc<Gate>>>,
+    shutdown_gate: Mutex<Option<Arc<Gate>>>,
     /// Computes a response from the request and the open documents (before `responses`).
     responder: Mutex<Option<Responder>>,
     peer: Mutex<Option<Peer>>,
@@ -121,8 +123,18 @@ impl Handler for MockHandler {
         let s = &self.0;
         s.requests.lock().push((method.to_owned(), params.clone()));
         match method {
-            "initialize" => Ok(json!({ "capabilities": s.caps.lock().clone(), "serverInfo": { "name": "mock" } })),
-            "shutdown" => Ok(Value::Null),
+            "initialize" => {
+                if let Some(gate) = s.init_gate.lock().clone() {
+                    gate.hold();
+                }
+                Ok(json!({ "capabilities": s.caps.lock().clone(), "serverInfo": { "name": "mock" } }))
+            }
+            "shutdown" => {
+                if let Some(gate) = s.shutdown_gate.lock().clone() {
+                    gate.hold();
+                }
+                Ok(Value::Null)
+            }
             _ => {
                 if let Some(e) = s.errors.lock().get(method) {
                     return Err(e.clone());
@@ -938,9 +950,9 @@ async fn a_fallback_leaves_when_the_preferred_server_is_enabled_again() {
     h.mgr.reconfigure().await;
     h.wait_status("main", ServerStatus::Ready).await;
     eventually(|| h.launcher.state("main").docs.lock().contains_key(&uri)).await;
+    eventually(|| h.removed("alt")).await;
     assert!(!h.launcher.state("alt").notified("textDocument/didClose").is_empty());
     assert_eq!(h.statuses("alt").last(), Some(&ServerStatus::Stopped));
-    assert!(h.removed("alt"));
     assert_eq!(h.mgr.servers().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["main"]);
     assert!(h.mgr.hover(doc, Pos::new(0, 0), Default::default()).await.is_ok());
     assert_eq!(h.launcher.state("alt").requested("textDocument/hover").len(), 0);
@@ -2747,4 +2759,212 @@ async fn a_dead_instance_has_no_license_view() {
     s.peer().kill();
     eventually(|| h.statuses("intellij-server").contains(&ServerStatus::Crashed)).await;
     assert!(h.mgr.intellij_license(server).is_none());
+}
+
+fn server_id(h: &Harness, name: &str) -> ServerId {
+    h.mgr.servers().into_iter().find(|s| s.name == name).unwrap().id
+}
+
+fn names(h: &Harness) -> Vec<String> {
+    let mut names: Vec<String> = h.mgr.servers().into_iter().map(|s| s.name).collect();
+    names.sort();
+    names
+}
+
+async fn hover_text(h: &Harness, doc: DocId) -> Option<String> {
+    h.mgr.hover(doc, Pos::new(0, 0), Default::default()).await.ok().flatten().map(|h| h.contents.value)
+}
+
+fn answer_hover(s: &MockState, text: &str) {
+    s.respond("textDocument/hover", json!({ "contents": { "kind": "markdown", "value": text } }));
+}
+
+#[cfg(unix)]
+async fn fallback_serving(h: &Harness, preferred: &str, code: i32, crashes: usize) -> (DocId, String) {
+    *h.launcher.state(preferred).exit_code.lock() = Some(code);
+    let (doc, path) = h.open("a.mk", "x");
+    let uri = uri_of(&path);
+    eventually(|| {
+        h.statuses(preferred).last() == Some(&ServerStatus::Crashed)
+            && h.launcher.state(preferred).launches.load(Ordering::SeqCst) == crashes
+    })
+    .await;
+    h.wait_status("alt", ServerStatus::Ready).await;
+    eventually(|| h.launcher.state("alt").docs.lock().contains_key(&uri)).await;
+    (doc, uri)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fallback_stays_until_the_restarted_server_is_ready() {
+    let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
+    let (_, uri) = fallback_serving(&h, "main", 1, 4).await;
+    let main = h.launcher.state("main");
+    let alt = h.launcher.state("alt");
+    *main.exit_code.lock() = None;
+    let gate = Arc::new(Gate::default());
+    *main.init_gate.lock() = Some(gate.clone());
+    let restart = {
+        let mgr = h.mgr.clone();
+        let id = server_id(&h, "main");
+        tokio::spawn(async move { mgr.restart(id).await })
+    };
+    eventually(|| gate.entered()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(alt.notified("textDocument/didClose").is_empty());
+    assert!(alt.docs.lock().contains_key(&uri));
+    assert!(!h.removed("alt"));
+
+    gate.open();
+    restart.await.unwrap().unwrap();
+    eventually(|| h.removed("alt")).await;
+    assert!(!alt.notified("textDocument/didClose").is_empty());
+    assert!(main.docs.lock().contains_key(&uri));
+    assert_eq!(names(&h), ["main"]);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fallback_outlives_a_failed_restart_of_intellij_server() {
+    let h = harness_with_fallbacks(&[("intellij-server", licensing_caps()), ("alt", incremental_caps())], &["alt"]);
+    let (doc, uri) = fallback_serving(&h, "intellij-server", 11, 1).await;
+    let alt = h.launcher.state("alt");
+    answer_hover(&alt, "alt");
+
+    assert!(h.mgr.restart(server_id(&h, "intellij-server")).await.is_err());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(alt.launches.load(Ordering::SeqCst), 1);
+    assert!(alt.notified("textDocument/didClose").is_empty());
+    assert!(alt.docs.lock().contains_key(&uri));
+    assert_eq!(hover_text(&h, doc).await.as_deref(), Some("alt"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_fallback_is_replaced_when_the_preferred_server_dies() {
+    let h = harness_with_fallbacks(&[("intellij-server", licensing_caps()), ("alt", incremental_caps())], &["alt"]);
+    let (doc, uri) = fallback_serving(&h, "intellij-server", 11, 1).await;
+    let ij = h.launcher.state("intellij-server");
+    let alt = h.launcher.state("alt");
+    let gate = Arc::new(Gate::default());
+    *alt.shutdown_gate.lock() = Some(gate.clone());
+    *ij.exit_code.lock() = None;
+    let restart = {
+        let mgr = h.mgr.clone();
+        let id = server_id(&h, "intellij-server");
+        tokio::spawn(async move { mgr.restart(id).await })
+    };
+    eventually(|| gate.entered()).await;
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    *ij.exit_code.lock() = Some(11);
+    ij.peer().kill();
+
+    eventually(|| alt.launches.load(Ordering::SeqCst) == 2).await;
+    eventually(|| h.mgr.servers().iter().any(|s| s.name == "alt" && s.status == ServerStatus::Ready)).await;
+    eventually(|| alt.docs.lock().contains_key(&uri)).await;
+    answer_hover(&alt, "alt");
+    assert_eq!(hover_text(&h, doc).await.as_deref(), Some("alt"));
+    gate.open();
+    let _ = restart.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enabling_a_missing_preferred_server_keeps_the_fallback_until_it_runs() {
+    let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
+    let disabled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec!["main".into()]));
+    {
+        let disabled = disabled.clone();
+        h.mgr.set_servers_hook(Box::new(move |_, defined| {
+            defined.iter().filter(|c| !disabled.lock().contains(&c.name)).cloned().collect()
+        }));
+    }
+    let version = Arc::new(AtomicUsize::new(0));
+    {
+        let version = version.clone();
+        h.mgr.set_config_hook(Box::new(move |cfg, _| {
+            if cfg.name == "main" {
+                cfg.args = vec![version.load(Ordering::SeqCst).to_string()];
+            }
+        }));
+    }
+    let (doc, path) = h.open("a.mk", "x");
+    let uri = uri_of(&path);
+    let main = h.launcher.state("main");
+    let alt = h.launcher.state("alt");
+    h.wait_status("alt", ServerStatus::Ready).await;
+
+    main.missing.store(true, Ordering::SeqCst);
+    disabled.lock().clear();
+    h.mgr.reconfigure().await;
+    h.wait_status("main", ServerStatus::Missing).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(alt.notified("textDocument/didClose").is_empty());
+    assert!(!h.statuses("alt").contains(&ServerStatus::Stopped));
+    assert!(alt.docs.lock().contains_key(&uri));
+
+    main.missing.store(false, Ordering::SeqCst);
+    version.fetch_add(1, Ordering::SeqCst);
+    h.mgr.reconfigure().await;
+    h.wait_status("main", ServerStatus::Ready).await;
+    eventually(|| h.removed("alt")).await;
+    assert!(main.docs.lock().contains_key(&uri));
+    assert_eq!(names(&h), ["main"]);
+    answer_hover(&main, "main");
+    assert_eq!(hover_text(&h, doc).await.as_deref(), Some("main"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_reconfigures_leave_the_document_served() {
+    let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
+    let disabled: Arc<Mutex<Vec<String>>> = Default::default();
+    {
+        let disabled = disabled.clone();
+        h.mgr.set_servers_hook(Box::new(move |_, defined| {
+            defined.iter().filter(|c| !disabled.lock().contains(&c.name)).cloned().collect()
+        }));
+    }
+    let (doc, _) = h.open("a.mk", "x");
+    h.wait_status("main", ServerStatus::Ready).await;
+    for i in 0..5 {
+        if i % 2 == 0 {
+            disabled.lock().push("main".into());
+        } else {
+            disabled.lock().clear();
+        }
+        tokio::join!(h.mgr.reconfigure(), h.mgr.reconfigure());
+    }
+    answer_hover(&h.launcher.state("alt"), "alt");
+    eventually(|| names(&h) == ["alt"] && h.mgr.servers()[0].status == ServerStatus::Ready).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while hover_text(&h, doc).await.as_deref() != Some("alt") {
+        assert!(std::time::Instant::now() < deadline, "the document has no working server");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    disabled.lock().clear();
+    tokio::join!(h.mgr.reconfigure(), h.mgr.reconfigure());
+    h.wait_status("main", ServerStatus::Ready).await;
+    eventually(|| names(&h) == ["main"]).await;
+    answer_hover(&h.launcher.state("main"), "main");
+    assert_eq!(hover_text(&h, doc).await.as_deref(), Some("main"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_virtual_document_keeps_the_fallback_it_was_opened_on() {
+    let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
+    let main = h.launcher.state("main");
+    let alt = h.launcher.state("alt");
+    main.missing.store(true, Ordering::SeqCst);
+    let (_, path) = h.open("a.mk", "x");
+    h.wait_status("alt", ServerStatus::Ready).await;
+    let class = "jdt://contents/x.class";
+    h.mgr.did_open_virtual(DocId::next(), class, &h.lang, 1, "class X {}");
+    eventually(|| alt.docs.lock().contains_key(class)).await;
+
+    main.missing.store(false, Ordering::SeqCst);
+    h.mgr.restart(server_id(&h, "main")).await.unwrap();
+    eventually(|| !alt.docs.lock().contains_key(&uri_of(&path))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(alt.docs.lock().contains_key(class));
+    assert!(!h.removed("alt"));
 }
