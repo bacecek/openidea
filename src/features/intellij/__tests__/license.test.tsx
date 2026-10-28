@@ -576,3 +576,97 @@ describe("IntelliJ license activation", () => {
     else expect(JSON.stringify(notes.at(-1))).toContain(body);
   });
 });
+
+describe("IntelliJ license replies and server lifetime", () => {
+  const later = (fn: () => void) => setTimeout(fn, 30);
+
+  it("waits for the subscription's license state that arrives after the reply", async () => {
+    handle = (request, value) => {
+      if (request === "jba/login") {
+        push(
+          view("unlicensed", {
+            subscriptions: [
+              {
+                assetId: "a1",
+                product: "IntelliJ IDEA Ultimate",
+                licensedTo: null,
+                validThrough: null,
+                licenseId: null,
+              },
+            ],
+          }),
+        );
+        return { status: "NoSuitableLicense" };
+      }
+      if (request === "subscriptions/use")
+        later(() => push(view("licensed", { license: license("subscription", { assetId: value }) })));
+      return null;
+    };
+    await openChooser();
+    await choose("Sign in with JetBrains Account");
+    await settle();
+    expect(titles()).not.toContain("Couldn't activate the subscription");
+    expect(notes.at(-1)).toMatchObject({ title: "IntelliJ license is active" });
+  });
+
+  it("waits for the license server's state that arrives after the reply", async () => {
+    push(
+      view("unlicensed", {
+        licenseServer: {
+          kind: "configured",
+          serverAddress: "https://old.example.com",
+          floatingTicketStatus: "NotObtained",
+          errorMessage: "Old error",
+        },
+      }),
+    );
+    handle = () => {
+      later(() => push(view("licensed", { license: license("licenseServer") })));
+      return { status: "Connected" };
+    };
+    act(() => notes.find((n) => n.title.includes("needs a license"))!.actions![0]!.run());
+    await settle();
+    await choose("Use a license server");
+    const field = screen.getByRole("textbox");
+    await userEvent.clear(field);
+    await userEvent.type(field, "https://lic.example.com");
+    await click("OK");
+    await settle();
+    await settle();
+    expect(notes.at(-1)).toMatchObject({ level: "info", title: "IntelliJ license is active" });
+  });
+
+  it("reports a failed activation code request instead of asking again", async () => {
+    lspIntellijLicensing.mockImplementationOnce(
+      async () => ({ status: "error" as const, error: { kind: "internal", message: "server stopped" } }) as never,
+    );
+    await openChooser();
+    await choose("Enter activation code");
+    await userEvent.type(screen.getByRole("textbox"), "ABCD");
+    await click("OK");
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(notes.at(-1)).toMatchObject({ level: "error", body: "server stopped" });
+  });
+
+  it("forgets the license of a server that crashed or stopped", async () => {
+    push(view("licensed", { license: license("trial", { daysLeft: 12 }) }));
+    expect(screen.getByRole("button", { name: /IntelliJ trial/ })).toBeInTheDocument();
+    act(() =>
+      useServers.setState({
+        servers: new Map([
+          [1, { id: 1, name: "intellij-server", status: "crashed", message: null, languages: ["java"], root: null }],
+        ]),
+      }),
+    );
+    expect(useLicenses.getState().views.size).toBe(0);
+    expect(screen.queryByRole("button", { name: /IntelliJ/ })).toBeNull();
+    push(view("licensed", { license: license("subscription") }));
+    expect(useLicenses.getState().views.size).toBe(0);
+
+    seeded.set(1, view("licensed", { license: license("subscription") }));
+    servers([1, "intellij-server"]);
+    await settle();
+    expect(useLicenses.getState().views.get(1)?.kind).toBe("licensed");
+  });
+});

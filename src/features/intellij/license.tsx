@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { create } from "zustand";
 import type { IntellijLicenseView, IntellijSubscription, ServerId } from "@/bindings";
-import { useServers } from "@/features/code-insight/servers";
+import { useServers, type ServerEntry } from "@/features/code-insight/servers";
 import { registerActions } from "@/platform/actions";
 import { formatClock } from "@/platform/dateFormat";
 import { tx } from "@/platform/i18n";
@@ -21,7 +21,10 @@ interface LicenseState {
 
 export const useLicenses = create<LicenseState>(() => ({ views: new Map(), signInUrl: null }));
 
-const ownServer = (id: ServerId) => useServers.getState().servers.get(id)?.name === INTELLIJ_SERVER;
+const alive = (s: ServerEntry | undefined) =>
+  s?.name === INTELLIJ_SERVER && s.status !== "crashed" && s.status !== "stopped";
+
+const ownServer = (id: ServerId) => alive(useServers.getState().servers.get(id));
 
 const ATTENTION: IntellijLicenseView["kind"][] = [
   "parked",
@@ -101,6 +104,25 @@ const REMOVAL: Record<string, string> = {
 };
 
 const viewOf = (server: ServerId) => useLicenses.getState().views.get(server);
+
+function waitForView(server: ServerId, ready: (view: IntellijLicenseView) => boolean): Promise<boolean> {
+  return new Promise((resolve) => {
+    const check = () => {
+      const view = viewOf(server);
+      return !!view && ready(view);
+    };
+    if (check()) return resolve(true);
+    const finish = (ok: boolean) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(ok);
+    };
+    const unsubscribe = useLicenses.subscribe(() => {
+      if (check()) finish(true);
+    });
+    const timer = setTimeout(() => finish(false), 5_000);
+  });
+}
 
 const request = (server: ServerId, name: string, value: string | null = null) =>
   call(commands.lspIntellijLicensing(server, name, value));
@@ -313,7 +335,9 @@ async function activateSubscription(server: ServerId) {
     chosen = subscriptions[labels.indexOf(picked)]!;
   }
   await request(server, "subscriptions/use", chosen.assetId);
-  if (viewOf(server)?.kind === "licensed") activated();
+  const licensed = (v: IntellijLicenseView) =>
+    v.kind === "licensed" && v.license?.source === "subscription" && v.license.assetId === chosen.assetId;
+  if (await waitForView(server, licensed)) activated();
   else notify("error", "Couldn't activate the subscription");
 }
 
@@ -369,7 +393,13 @@ async function enterCode(server: ServerId) {
     });
     if (input === null) return;
     code = input.replace(/\s+/g, "");
-    if ((await request(server, "activationCode/use", code).catch(() => false)) === true) return activated();
+    let reply: unknown;
+    try {
+      reply = await request(server, "activationCode/use", code);
+    } catch (e) {
+      return failed("Couldn't check the activation code", e);
+    }
+    if (reply === true) return activated();
   }
 }
 
@@ -382,15 +412,18 @@ async function connectLicenseServer(server: ServerId) {
   });
   if (url === null) return;
   const title = "Couldn't connect to the license server";
+  const before = viewOf(server);
+  const refusal = (v: IntellijLicenseView) =>
+    v.licenseServer.kind === "configured" && v.license?.source !== "licenseServer"
+      ? v.licenseServer.errorMessage?.trim()
+      : null;
   try {
     const reply = await request(server, "licenseServer/add", url);
     const status = field(reply, "status");
     if (status === "Connected") {
+      await waitForView(server, (v) => v !== before && (v.license?.source === "licenseServer" || !!refusal(v)));
       const view = viewOf(server);
-      const refused =
-        view?.licenseServer.kind === "configured" && view.license?.source !== "licenseServer"
-          ? view.licenseServer.errorMessage?.trim()
-          : null;
+      const refused = view && refusal(view);
       if (refused) notify("error", title, refused);
       else activated();
     } else if (status === "TimedOut") notify("error", title, tx("Sign-in to the license server timed out."));
@@ -493,7 +526,7 @@ export function installLicensing(): () => void {
     }
   };
   const sync = () => {
-    const own = [...useServers.getState().servers.values()].filter((s) => s.name === INTELLIJ_SERVER).map((s) => s.id);
+    const own = [...useServers.getState().servers.values()].filter(alive).map((s) => s.id);
     const views = useLicenses.getState().views;
     if ([...views.keys()].some((id) => !own.includes(id)))
       useLicenses.setState({ views: new Map([...views].filter(([id]) => own.includes(id))) });

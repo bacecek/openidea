@@ -4584,5 +4584,6 @@
   "Couldn't sign in to your JetBrains Account": "无法登录您的 JetBrains 账户",
   "Couldn't connect to the license server": "无法连接到许可证服务器",
   "IntelliJ IDEA's server is not running in this project": "IntelliJ IDEA 的服务器未在此项目中运行",
-  "Enter a URL that starts with http:// or https://": "请输入以 http:// 或 https:// 开头的 URL"
+  "Enter a URL that starts with http:// or https://": "请输入以 http:// 或 https:// 开头的 URL",
+  "Couldn't check the activation code": "无法检查激活码"
 }
