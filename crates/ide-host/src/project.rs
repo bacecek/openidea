@@ -690,7 +690,7 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 fn process_alive(_pid: u32) -> bool {
-    true
+    false
 }
 
 struct LspObserver(Arc<LspManager>);
