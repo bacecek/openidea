@@ -4585,5 +4585,7 @@
   "Couldn't connect to the license server": "无法连接到许可证服务器",
   "IntelliJ IDEA's server is not running in this project": "IntelliJ IDEA 的服务器未在此项目中运行",
   "Enter a URL that starts with http:// or https://": "请输入以 http:// 或 https:// 开头的 URL",
-  "Couldn't check the activation code": "无法检查激活码"
+  "Couldn't check the activation code": "无法检查激活码",
+  "Use jdtls and kotlin-lsp": "使用 jdtls 和 kotlin-lsp",
+  "Couldn't switch to jdtls and kotlin-lsp": "无法切换到 jdtls 和 kotlin-lsp"
 }

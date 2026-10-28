@@ -11,7 +11,7 @@ import { BarButton, Button, copyText, Icon, selectableText, T } from "@/ui";
 import { notifications, registerStatusItem } from "@/workbench/contributions";
 import { chooseItem, promptInput } from "@/workbench/inputDialogs";
 import { ask, confirm, showError, type MessageButton } from "@/workbench/messages";
-import { INTELLIJ_SERVER } from "./consent";
+import { INTELLIJ_SERVER, intellijSettings, saveIntellijSettings } from "./consent";
 import styles from "./consent.module.css";
 
 interface LicenseState {
@@ -135,6 +135,13 @@ const errorText = (reply: unknown) => String(field(reply, "errorMessage") ?? "")
 const notify = (level: "info" | "warning" | "error", title: string, body?: string) =>
   notifications().notify({ group: "lsp", level, title, body: body || undefined });
 
+const switchToFallbacks = () =>
+  void saveIntellijSettings({ ...intellijSettings(), declined: true }).catch((e) =>
+    failed("Couldn't switch to jdtls and kotlin-lsp", e),
+  );
+
+const fallbackAction = { label: "Use jdtls and kotlin-lsp", run: switchToFallbacks };
+
 const activated = () => notify("info", "IntelliJ license is active");
 
 const failed = (title: string, e: unknown) => notify("error", title, e instanceof Error ? e.message : String(e));
@@ -215,6 +222,8 @@ async function openLicenseDialog(server: ServerId) {
   ];
   if (view.license && REMOVAL[view.license.source]) buttons.push({ id: "remove", label: "Remove License" });
   if (SIGNED_IN.includes(view.account.authenticationStatus)) buttons.push({ id: "signOut", label: "Sign Out" });
+  if (view.kind === "parked" || view.kind === "unlicensed")
+    buttons.push({ id: "fallbacks", label: "Use jdtls and kotlin-lsp" });
   buttons.push({ id: "close", label: "Close", primary: active });
   dialogOpen = true;
   const r = await ask({
@@ -227,6 +236,7 @@ async function openLicenseDialog(server: ServerId) {
   }).finally(() => (dialogOpen = false));
   if (r.button === "activate") await openActivation(server);
   else if (r.button === "remove") await removeLicense(server);
+  else if (r.button === "fallbacks") switchToFallbacks();
   else if (r.button === "signOut") await request(server, "jba/logout").catch((e) => failed("Couldn't sign out", e));
 }
 
@@ -480,7 +490,7 @@ function notifyChange(server: ServerId, prev: IntellijLicenseView | undefined, v
       level: "error",
       title: "IntelliJ license lost",
       key: `${KEY}-lost`,
-      actions: [{ label: "Activate…", run: () => void openActivation(server) }],
+      actions: [{ label: "Activate…", run: () => void openActivation(server) }, fallbackAction],
     });
     return true;
   } else if (view.kind === "sessionExpired" && prev?.kind !== "sessionExpired") {
@@ -498,6 +508,7 @@ function notifyChange(server: ServerId, prev: IntellijLicenseView | undefined, v
 
 export function installLicensing(): () => void {
   let offered = false;
+  removedAt = 0;
   const setView = (server: ServerId, view: IntellijLicenseView) => {
     const prev = useLicenses.getState().views.get(server);
     useLicenses.setState((s) => ({ views: new Map(s.views).set(server, view) }));
@@ -513,7 +524,7 @@ export function installLicensing(): () => void {
       title: "IntelliJ IDEA's Java and Kotlin server needs a license",
       key: `${KEY}-offer`,
       sticky: true,
-      actions: [{ label: "Activate…", run: () => void openActivation(server) }],
+      actions: [{ label: "Activate…", run: () => void openActivation(server) }, fallbackAction],
     });
   };
   const seed = (ids: Iterable<ServerId>) => {

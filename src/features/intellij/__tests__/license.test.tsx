@@ -15,9 +15,13 @@ const lspIntellijLicense = vi.fn(async (server: number) => ({
   data: seeded.get(server) ?? null,
 }));
 const openExternalUrl = vi.fn(async (_url: string) => {});
+const settingsSet = vi.fn(async (_scope: string, _key: string, value: string) => ({
+  status: "ok" as const,
+  data: { languages: { java: { intellijServer: JSON.parse(value) } } } as never,
+}));
 vi.mock("@/platform/ipc", async (orig) => {
   const actual = await orig<typeof import("@/platform/ipc")>();
-  return { ...actual, commands: { ...actual.commands, lspIntellijLicensing, lspIntellijLicense } };
+  return { ...actual, commands: { ...actual.commands, lspIntellijLicensing, lspIntellijLicense, settingsSet } };
 });
 vi.mock("@/platform/openUrl", () => ({ openExternalUrl }));
 
@@ -163,7 +167,7 @@ describe("IntelliJ license notices", () => {
     const offers = notes.filter((n) => n.title === "IntelliJ IDEA's Java and Kotlin server needs a license");
     expect(offers).toHaveLength(1);
     expect(offers[0]).toMatchObject({ level: "warning", sticky: true });
-    expect(offers[0]!.actions?.map((a) => a.label)).toEqual(["Activate…"]);
+    expect(offers[0]!.actions?.map((a) => a.label)).toEqual(["Activate…", "Use jdtls and kotlin-lsp"]);
   });
 
   it("opens sign-in pages only for this window's servers", () => {
@@ -668,5 +672,46 @@ describe("IntelliJ license replies and server lifetime", () => {
     servers([1, "intellij-server"]);
     await settle();
     expect(useLicenses.getState().views.get(1)?.kind).toBe("licensed");
+  });
+});
+
+describe("Switching to jdtls and kotlin-lsp", () => {
+  const written = () => settingsSet.mock.calls.map(([scope, key, value]) => ({ scope, key, value: JSON.parse(value) }));
+  const declined = [
+    { scope: "global", key: "languages.java.intellijServer", value: { acceptedTerms: true, declined: true } },
+  ];
+
+  beforeEach(async () => {
+    const { useProject } = await import("@/platform/project");
+    useProject.setState({ settings: { languages: { java: { intellijServer: { acceptedTerms: true } } } } as never });
+  });
+
+  afterEach(async () => {
+    const { useProject } = await import("@/platform/project");
+    useProject.setState({ settings: null });
+  });
+
+  it("is offered when the license is lost", async () => {
+    push(view("licensed", { license: license("subscription") }));
+    push(view("parked"));
+    const lost = notes.find((n) => n.title === "IntelliJ license lost")!;
+    expect(lost.actions?.map((a) => a.label)).toEqual(["Activate…", "Use jdtls and kotlin-lsp"]);
+    act(() => lost.actions![1]!.run());
+    await settle();
+    expect(written()).toEqual(declined);
+  });
+
+  it("is a button in the license dialog while there is no license", async () => {
+    push(view("licensed", { license: license("subscription") }));
+    await executeAction("intellij.license");
+    await settle();
+    expect(within(dialog()).queryByRole("button", { name: "Use jdtls and kotlin-lsp" })).toBeNull();
+    await click("Close");
+
+    push(view("unlicensed"));
+    await click("IntelliJ: no license");
+    await click("Use jdtls and kotlin-lsp");
+    await settle();
+    expect(written()).toEqual(declined);
   });
 });

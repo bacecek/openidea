@@ -38,7 +38,7 @@ export function intellijUndecided(): boolean {
   return !acceptedTerms && !declined;
 }
 
-async function save(value: IntellijServerSettings) {
+export async function saveIntellijSettings(value: IntellijServerSettings) {
   const settings = await call(commands.settingsSet("global", "languages.java.intellijServer", JSON.stringify(value)));
   useProject.setState({ settings });
 }
@@ -125,11 +125,11 @@ async function showConsent(): Promise<Consent> {
     ],
   }).finally(unsubscribe);
   if (r.button === "accept") {
-    await save({ ...current, ...choice, acceptedTerms: true, declined: false });
+    await saveIntellijSettings({ ...current, ...choice, acceptedTerms: true, declined: false });
     return "accepted";
   }
   if (r.button === "decline") {
-    await save({ ...current, declined: true });
+    await saveIntellijSettings({ ...current, declined: true });
     return "declined";
   }
   return "later";
