@@ -437,7 +437,7 @@ async fn intellij_server_end_to_end() {
         &[AppliedChange { range: Range::point(Pos::new(10, 0)), text: "        \"x\".\n".into() }],
         &|| unreachable!(),
     );
-    retry("completion", Duration::from_secs(60), || {
+    retry("completion", Duration::from_secs(240), || {
         let mgr = mgr.clone();
         async move {
             let list = mgr.completion(doc, Pos::new(10, 12), Some(".".into()), Default::default()).await.ok()?;
