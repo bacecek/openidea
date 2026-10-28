@@ -7,25 +7,48 @@
 import { executeAction } from "@/platform/actions";
 import { onIdeEvent } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
-import { INTELLIJ_FALLBACKS, INTELLIJ_SERVER, intellijSettings } from "@/features/intellij/consent";
+import type { ServerStatus } from "@/bindings";
+import { useServers } from "@/features/code-insight/servers";
+import { INTELLIJ_FALLBACKS, INTELLIJ_SERVER, intellijSettings, useConsentPrompt } from "@/features/intellij/consent";
 import { notifications } from "@/workbench/contributions";
 import { installTool, refreshTools, SETTINGS_PAGE_ID, toolByName, useTools } from "./store";
 import { tx } from "@/platform/i18n";
 
 export const missingKey = (name: string) => `lsp-missing-${name}`;
 
+const NOT_SERVING: ServerStatus[] = ["missing", "crashed", "misconfigured"];
+
+const intellijEnabled = () => useProject.getState().settings?.languageServers?.[INTELLIJ_SERVER]?.enabled !== false;
+
+function intellijServes(): boolean {
+  const { acceptedTerms, declined } = intellijSettings();
+  if (!acceptedTerms || declined || !intellijEnabled() || toolByName(INTELLIJ_SERVER)?.status === "missing")
+    return false;
+  return ![...useServers.getState().servers.values()].some(
+    (s) => s.name === INTELLIJ_SERVER && NOT_SERVING.includes(s.status),
+  );
+}
+
+function intellijOnItsWay(): boolean {
+  if (!useProject.getState().settings) return true;
+  const { acceptedTerms, declined } = intellijSettings();
+  if (declined || !intellijEnabled()) return false;
+  const consent = useConsentPrompt.getState();
+  if (consent.asking || useTools.getState().jobs[INTELLIJ_SERVER]) return true;
+  return acceptedTerms ? intellijServes() : !consent.dismissed;
+}
+
 export async function promptInstall(name: string): Promise<boolean> {
   if (!useTools.getState().loaded) await refreshTools();
   const tool = toolByName(name);
   if (!tool || !tool.canInstall || tool.status !== "missing") return false;
   // An installed alternative (typescript-language-server for vtsls) already serves these files.
-  const declined = intellijSettings().declined;
   const served = useTools
     .getState()
     .tools.some(
       (t) =>
         t.name !== name &&
-        !(declined && t.name === INTELLIJ_SERVER) &&
+        (t.name !== INTELLIJ_SERVER || intellijServes()) &&
         t.kind === tool.kind &&
         t.status !== "missing" &&
         t.languages.some((l) => tool.languages.includes(l)),
@@ -56,18 +79,31 @@ export function installMissingServerPrompts(): () => void {
     // Async on purpose: lands after the synchronous generic notice and replaces it.
     void promptInstall(name).catch(() => {});
   };
-  const offEvents = onIdeEvent("languageServer", (e) => {
-    if (e.status !== "missing" || prompted.has(e.name)) return;
-    if (INTELLIJ_FALLBACKS.includes(e.name) && !intellijSettings().declined) waiting.add(e.name);
-    else prompt(e.name);
-  });
-  const offSettings = useProject.subscribe(() => {
-    if (!waiting.size || !intellijSettings().declined) return;
-    waiting.forEach(prompt);
+  const release = () => {
+    if (!waiting.size || intellijOnItsWay()) return;
+    const names = [...waiting];
     waiting.clear();
+    names.forEach(prompt);
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(release, 0);
+  };
+  const offEvents = onIdeEvent("languageServer", (e) => {
+    if (e.status === "missing" && !prompted.has(e.name)) {
+      if (!INTELLIJ_FALLBACKS.includes(e.name)) prompt(e.name);
+      else {
+        waiting.add(e.name);
+        if (!useTools.getState().loaded) void refreshTools();
+      }
+    }
+    schedule();
   });
+  const unsubs = [useProject, useTools, useServers, useConsentPrompt].map((store) => store.subscribe(schedule));
   return () => {
     offEvents();
-    offSettings();
+    unsubs.forEach((u) => u());
+    clearTimeout(timer);
   };
 }

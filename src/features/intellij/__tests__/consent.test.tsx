@@ -17,8 +17,10 @@ const { useProject } = await import("@/platform/project");
 const { provideNotificationService } = await import("@/workbench/contributions");
 const { MessagesHost } = await import("@/workbench/messages");
 const { MemoryToolsBackend, sampleTools, setToolsBackend } = await import("@/features/tools/backend");
-const { installTool, useTools } = await import("@/features/tools/store");
+const { cancelInstall, installTool, useTools } = await import("@/features/tools/store");
 const { installMissingServerPrompts } = await import("@/features/tools/missing");
+const { useServers } = await import("@/features/code-insight/servers");
+const { useConsentPrompt } = await import("../consent");
 const { activate } = await import("../index");
 
 type ToolsBackend = InstanceType<typeof MemoryToolsBackend>;
@@ -57,6 +59,7 @@ beforeEach(() => {
   setToolsBackend(backend);
   useTools.setState({ tools: [], loaded: false, loading: false, error: null, jobs: {}, logs: {} });
   decided(undefined);
+  useConsentPrompt.setState({ asking: false, dismissed: false });
   render(<MessagesHost />);
   off = activate();
 });
@@ -220,5 +223,79 @@ describe("IntelliJ IDEA consent", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(settingsSet).not.toHaveBeenCalled();
     expect(backend.restarted).toEqual([]);
+  });
+
+  describe("jdtls install offer when IntelliJ's server isn't on its way", () => {
+    const jdtlsOffer = "Eclipse JDT LS is not installed";
+    let offPrompts: () => void;
+    beforeEach(() => {
+      offPrompts = installMissingServerPrompts();
+    });
+    afterEach(() => {
+      offPrompts();
+      useServers.setState({ servers: new Map() });
+    });
+
+    const intellijStatus = (status: "ready" | "crashed" | "misconfigured") =>
+      act(() =>
+        useServers.setState({
+          servers: new Map([
+            [7, { id: 7, name: "intellij-server", status, message: null, languages: ["java", "kotlin"], root: null }],
+          ]),
+        }),
+      );
+    const installed = () =>
+      (backend.tools = backend.tools.map((t) => (t.name === "intellij-server" ? { ...t, status: "installed" } : t)));
+
+    it("shows the held offer when the download fails", async () => {
+      backend.failNext = "intellij-server";
+      serverEvent("jdtls", "missing");
+      await settle();
+      await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+      await waitFor(() => expect(notes).toContain(jdtlsOffer));
+      expect(notes).toContain("Failed to install IntelliJ IDEA");
+    });
+
+    it("shows the held offer when the download is cancelled", async () => {
+      backend.stepMs = 30;
+      serverEvent("jdtls", "missing");
+      await settle();
+      await userEvent.click(screen.getByRole("button", { name: "Accept and Install" }));
+      await waitFor(() => expect(useTools.getState().jobs["intellij-server"]).toBeDefined());
+      expect(notes).toEqual([]);
+      act(() => cancelInstall("intellij-server"));
+      await waitFor(() => expect(notes).toEqual([jdtlsOffer]));
+    });
+
+    it("shows the held offer when the consent dialog is dismissed", async () => {
+      serverEvent("jdtls", "missing");
+      await settle();
+      expect(notes).toEqual([]);
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(notes).toEqual([jdtlsOffer]));
+    });
+
+    it("offers jdtls once IntelliJ's server crashes or gives up", async () => {
+      installed();
+      decided({ acceptedTerms: true });
+      intellijStatus("ready");
+      serverEvent("jdtls", "missing");
+      await settle();
+      expect(notes).toEqual([]);
+      intellijStatus("misconfigured");
+      await waitFor(() => expect(notes).toEqual([jdtlsOffer]));
+    });
+
+    it("offers jdtls when IntelliJ's server is turned off", async () => {
+      installed();
+      useProject.setState({
+        settings: {
+          languages: { java: { intellijServer: { acceptedTerms: true } } },
+          languageServers: { "intellij-server": { enabled: false } },
+        } as Settings,
+      });
+      serverEvent("jdtls", "missing");
+      await waitFor(() => expect(notes).toEqual([jdtlsOffer]));
+    });
   });
 });

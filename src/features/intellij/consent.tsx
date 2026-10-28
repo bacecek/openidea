@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { create } from "zustand";
 import type { IntellijServerSettings } from "@/bindings";
 import { call, commands } from "@/platform/ipc";
 import { openExternalUrl } from "@/platform/openUrl";
@@ -98,10 +99,26 @@ function ConsentBody({ initial, onChange }: { initial: Choice; onChange: (choice
   );
 }
 
+export const useConsentPrompt = create(() => ({ asking: false, dismissed: false }));
+
 let pending: Promise<Consent> | null = null;
 
 export function askConsent(): Promise<Consent> {
-  pending ??= showConsent().finally(() => (pending = null));
+  if (!pending) {
+    useConsentPrompt.setState({ asking: true });
+    pending = showConsent().then(
+      (answer) => {
+        pending = null;
+        useConsentPrompt.setState({ asking: false, dismissed: answer === "later" });
+        return answer;
+      },
+      (e) => {
+        pending = null;
+        useConsentPrompt.setState({ asking: false, dismissed: true });
+        throw e;
+      },
+    );
+  }
   return pending;
 }
 
