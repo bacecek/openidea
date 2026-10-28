@@ -1,6 +1,7 @@
 //! IPC commands of `ide_host::ops::lsp` (the shared implementation).
 
 use crate::state::AppState;
+use ide_core::event::{IntellijLicenseView, IntellijLicensingReply};
 use ide_core::{DocId, IdeResult, Location, Pos, Range, RequestId, ServerId, TextEdit, WorkspaceEdit};
 #[allow(unused_imports)]
 pub use ide_host::ops::lsp::*;
@@ -320,6 +321,28 @@ pub fn lsp_resend_diagnostics(window: Window, state: State<'_, AppState>) -> Ide
 #[specta::specta]
 pub async fn lsp_restart(window: Window, state: State<'_, AppState>, server: ServerId) -> IdeResult<()> {
     ide_host::ops::lsp::lsp_restart(&state.host, window.label(), server).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn lsp_intellij_licensing(
+    window: Window,
+    state: State<'_, AppState>,
+    server: ServerId,
+    request: String,
+    value: Option<String>,
+) -> IdeResult<IntellijLicensingReply> {
+    ide_host::ops::lsp::lsp_intellij_licensing(&state.host, window.label(), server, request, value).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn lsp_intellij_license(
+    window: Window,
+    state: State<'_, AppState>,
+    server: ServerId,
+) -> IdeResult<Option<IntellijLicenseView>> {
+    ide_host::ops::lsp::lsp_intellij_license(&state.host, window.label(), server)
 }
 
 /// Applies a (previewed) workspace edit, e.g. after rename confirmation.

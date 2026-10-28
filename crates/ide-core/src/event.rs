@@ -115,6 +115,84 @@ pub enum IdeEvent {
     AskpassDone {
         id: u64,
     },
+    IntellijLicense {
+        server: ServerId,
+        view: Box<IntellijLicenseView>,
+    },
+    OpenExternalUrl {
+        server: ServerId,
+        url: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum IntellijLicenseKind {
+    Authenticating,
+    SessionExpired,
+    Licensed,
+    Grace,
+    Parked,
+    #[default]
+    Unlicensed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IntellijLicenseView {
+    pub kind: IntellijLicenseKind,
+    pub license: Option<IntellijActiveLicense>,
+    pub account: IntellijAccount,
+    pub subscriptions: Vec<IntellijSubscription>,
+    pub license_server: IntellijLicenseServer,
+    pub parked_reason: Option<String>,
+    pub grace_deadline: Option<f64>,
+    pub env_license: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IntellijActiveLicense {
+    pub source: String,
+    pub status: String,
+    pub product: String,
+    pub licensed_to: Option<String>,
+    pub valid_through: Option<String>,
+    pub days_left: Option<i32>,
+    pub asset_id: Option<String>,
+    pub server_address: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IntellijAccount {
+    pub authentication_status: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IntellijSubscription {
+    pub asset_id: String,
+    pub product: String,
+    pub licensed_to: Option<String>,
+    pub valid_through: Option<String>,
+    pub license_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub struct IntellijLicensingReply(#[specta(type = specta_typescript::Unknown)] pub serde_json::Value);
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct IntellijLicenseServer {
+    pub kind: String,
+    pub server_address: Option<String>,
+    pub floating_ticket_status: Option<String>,
+    pub error_message: Option<String>,
 }
 
 /// What an askpass prompt asks for.

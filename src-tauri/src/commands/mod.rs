@@ -176,6 +176,8 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         lsp::lsp_servers,
         lsp::lsp_resend_diagnostics,
         lsp::lsp_restart,
+        lsp::lsp_intellij_licensing,
+        lsp::lsp_intellij_license,
         lsp::apply_workspace_edit,
         lsp::lsp_execute_command,
         vcs::vcs_status,

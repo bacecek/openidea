@@ -1,6 +1,7 @@
 use crate::Host;
 use crate::apply_workspace_edit as apply_edit;
 use crate::rpc::Dispatcher;
+use ide_core::event::{IntellijLicenseView, IntellijLicensingReply};
 use ide_core::{DocId, IdeResult, Location, Pos, Range, RequestId, ServerId, TextEdit, WorkspaceEdit};
 use ide_lsp::types::*;
 
@@ -250,6 +251,20 @@ pub async fn lsp_restart(host: &Host, window: &str, server: ServerId) -> IdeResu
     host.project(window)?.lsp.restart(server).await
 }
 
+pub async fn lsp_intellij_licensing(
+    host: &Host,
+    window: &str,
+    server: ServerId,
+    request: String,
+    value: Option<String>,
+) -> IdeResult<IntellijLicensingReply> {
+    host.project(window)?.lsp.intellij_licensing(server, &request, value).await.map(IntellijLicensingReply)
+}
+
+pub fn lsp_intellij_license(host: &Host, window: &str, server: ServerId) -> IdeResult<Option<IntellijLicenseView>> {
+    Ok(host.project(window)?.lsp.intellij_license(server))
+}
+
 /// Applies a (previewed) workspace edit, e.g. after rename confirmation.
 pub fn apply_workspace_edit(host: &Host, window: &str, edit: WorkspaceEdit) -> IdeResult<()> {
     let project = host.project(window)?;
@@ -356,6 +371,10 @@ pub(crate) fn register(d: &mut Dispatcher) {
     d.add("lsp_servers", |c| async move { lsp_servers(&c.host, &c.window) });
     d.add("lsp_resend_diagnostics", |c| async move { lsp_resend_diagnostics(&c.host, &c.window) });
     d.add("lsp_restart", |c| async move { lsp_restart(&c.host, &c.window, c.arg("server")?).await });
+    d.add("lsp_intellij_licensing", |c| async move {
+        lsp_intellij_licensing(&c.host, &c.window, c.arg("server")?, c.arg("request")?, c.arg("value")?).await
+    });
+    d.add("lsp_intellij_license", |c| async move { lsp_intellij_license(&c.host, &c.window, c.arg("server")?) });
     d.add("apply_workspace_edit", |c| async move { apply_workspace_edit(&c.host, &c.window, c.arg("edit")?) });
     d.add("lsp_execute_command", |c| async move {
         lsp_execute_command(&c.host, &c.window, c.arg("doc")?, c.arg("command")?).await

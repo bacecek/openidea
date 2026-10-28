@@ -200,6 +200,7 @@ impl Handler for ClientHandler {
                     _ => tracing::debug!("[{}] {text}", self.server.name),
                 }
             }
+            "jetbrains/licensing/state" => mgr.on_licensing_state(&self.server, params),
             "tsserver/request" => mgr.forward_tsserver_requests(self.server.clone(), self.generation, params),
             "telemetry/event" | "$/logTrace" | "$/cancelRequest" => {}
             other => tracing::trace!("[{}] unhandled notification {other}", self.server.name),
@@ -216,7 +217,13 @@ impl Handler for ClientHandler {
                 self.show_message(&mgr, &params);
                 Ok(Value::Null)
             }
-            "window/showDocument" => Ok(json!({ "success": false })),
+            "window/showDocument" => match crate::intellij::external_url(&self.server.name, &params) {
+                Some(url) => {
+                    mgr.sink().emit(IdeEvent::OpenExternalUrl { server: self.server.id, url: url.to_owned() });
+                    Ok(json!({ "success": true }))
+                }
+                None => Ok(json!({ "success": false })),
+            },
             "workspace/configuration" => Ok(self.configuration(&params)),
             "workspace/workspaceFolders" => Ok(mgr.workspace_folders(&self.server)),
             "client/registerCapability" => {

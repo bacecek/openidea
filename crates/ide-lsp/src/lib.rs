@@ -11,6 +11,7 @@ mod convert;
 mod file_ops;
 mod handler;
 mod inspect;
+mod intellij;
 pub mod jdtls;
 mod launch;
 mod scope;
@@ -164,6 +165,7 @@ pub struct LspManager {
     virtual_origins: Mutex<HashMap<String, ide_core::ServerId>>,
     /// Contents fetched for virtual URIs.
     virtual_docs: Mutex<HashMap<String, VirtualDocument>>,
+    intellij_licenses: Mutex<HashMap<ide_core::ServerId, intellij::License>>,
 }
 
 /// Fetched virtual documents kept before the cache is reset.
@@ -280,6 +282,7 @@ impl LspManager {
             shown_messages: Mutex::new(HashSet::new()),
             virtual_origins: Mutex::new(HashMap::new()),
             virtual_docs: Mutex::new(HashMap::new()),
+            intellij_licenses: Mutex::new(HashMap::new()),
         })
     }
 
@@ -483,6 +486,7 @@ impl LspManager {
         }
         server.refresh_busy_status(&self.sink);
         server.announce_ready(generation);
+        self.start_licensing(&server, &run);
         self.spawn_supervisor(server, generation, peer);
     }
 
@@ -507,6 +511,11 @@ impl LspManager {
             return;
         }
         let tail = server.stderr_tail(5);
+        if let Some(message) = intellij::exit_message(&server.name, code, &tail) {
+            server.give_up(generation);
+            server.set_status(&self.sink, ServerStatus::Crashed, Some(message));
+            return;
+        }
         let cfg = server.effective_config();
         let mut message = match (code, &cfg.connect) {
             (Some(c), _) => format!("{} exited with code {c}", server.name),
@@ -572,6 +581,9 @@ impl LspManager {
         });
         if !init_options.is_null() {
             params["initializationOptions"] = init_options;
+        }
+        if server.name == intellij::SERVER {
+            intellij::add_client_capabilities(&mut params["capabilities"]);
         }
         params
     }

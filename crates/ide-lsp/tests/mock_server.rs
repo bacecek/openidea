@@ -27,6 +27,8 @@ struct MockState {
     /// uri → text as reconstructed by the mock from didOpen/didChange.
     docs: Mutex<HashMap<String, String>>,
     responses: Mutex<HashMap<String, Value>>,
+    errors: Mutex<HashMap<String, (i64, String)>>,
+    exit_code: Mutex<Option<i32>>,
     /// Computes a response from the request and the open documents (before `responses`).
     responder: Mutex<Option<Responder>>,
     peer: Mutex<Option<Peer>>,
@@ -122,6 +124,9 @@ impl Handler for MockHandler {
             "initialize" => Ok(json!({ "capabilities": s.caps.lock().clone(), "serverInfo": { "name": "mock" } })),
             "shutdown" => Ok(Value::Null),
             _ => {
+                if let Some(e) = s.errors.lock().get(method) {
+                    return Err(e.clone());
+                }
                 let responder = s.responder.lock().clone();
                 if let Some(v) = responder.and_then(|f| f(s, method, &params)) {
                     return Ok(v);
@@ -147,15 +152,20 @@ impl Launcher for MockLauncher {
     fn launch(
         &self,
         config: &LanguageServerConfig,
-        _root: &Path,
+        root: &Path,
         handler: Arc<dyn Handler>,
-        _on_stderr: Box<dyn Fn(String) + Send + Sync>,
+        on_stderr: Box<dyn Fn(String) + Send + Sync>,
     ) -> Result<Peer, LaunchError> {
         let state = self.state(&config.name);
         if state.missing.load(Ordering::SeqCst) {
             return Err(LaunchError::Missing);
         }
         state.launches.fetch_add(1, Ordering::SeqCst);
+        if let Some(code) = *state.exit_code.lock() {
+            let script = format!("exit {code}");
+            return Peer::spawn("sh", &["-c".into(), script], root, &[], handler, on_stderr)
+                .map_err(|e| LaunchError::Failed(e.to_string()));
+        }
         state.docs.lock().clear();
         let (client_io, server_io) = tokio::io::duplex(1 << 20);
         let (sr, sw) = tokio::io::split(server_io);
@@ -1832,4 +1842,340 @@ async fn rename_edits_files_outside_the_analysis_scope() {
     paths.sort();
     assert_eq!(paths, vec![a, b.clone()]);
     eventually(|| uris(&s.notified("textDocument/didClose")) == vec![uri_of(&b)]).await;
+}
+
+// ------------------------------------------------------------------ intellij-server licensing
+
+#[tokio::test(flavor = "multi_thread")]
+async fn licensing_capabilities_go_only_to_intellij_server() {
+    let h = harness(&[("intellij-server", incremental_caps()), ("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+
+    let ij = &h.launcher.state("intellij-server").requested("initialize")[0]["capabilities"];
+    assert_eq!(ij["experimental"]["licensingUi"], true);
+    assert_eq!(ij["window"]["showDocument"]["support"], true);
+    assert_eq!(ij["window"]["workDoneProgress"], true);
+
+    let other = &h.launcher.state("mock").requested("initialize")[0]["capabilities"];
+    assert_eq!(other["experimental"], json!({}));
+    assert_eq!(other["window"]["showDocument"]["support"], false);
+}
+
+fn licensing_caps() -> Value {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({ "licensing": true });
+    caps
+}
+
+fn license_views(h: &Harness) -> Vec<ide_core::event::IntellijLicenseView> {
+    h.events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::IntellijLicense { view, .. } => Some((**view).clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn licensing_state(active: Value, jba: &str, extra: Value) -> Value {
+    let mut state = json!({
+        "activeLicense": active,
+        "jbaLicensingState": { "authenticationStatus": jba },
+        "licenseServerFlowState": { "kind": "notConfigured" },
+        "featuresDeclined": false,
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        state[k] = v.clone();
+    }
+    state
+}
+
+fn license(status: &str) -> Value {
+    json!({ "source": "subscription", "status": status, "product": "IIU" })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn licensing_state_pushes_become_views() {
+    use ide_core::event::IntellijLicenseKind as K;
+    let h = harness(&[("intellij-server", licensing_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let peer = h.launcher.state("intellij-server").peer();
+    let configured = json!({ "licenseServerFlowState": { "kind": "configured", "floatingTicketStatus": "Obtaining" } });
+    let cases = [
+        (licensing_state(Value::Null, "Authenticating", json!({})), K::Authenticating),
+        (licensing_state(license("Expired"), "NotAuthenticated", configured), K::Authenticating),
+        (licensing_state(license("Valid"), "Authenticating", json!({})), K::Licensed),
+        (licensing_state(license("Valid"), "FailedToProlongateAuthentication", json!({})), K::SessionExpired),
+        (licensing_state(license("Valid"), "Authenticated", json!({ "graceDeadline": 1767225600000u64 })), K::Licensed),
+        (licensing_state(license("Expired"), "Authenticated", json!({ "graceDeadline": 1767225600000u64 })), K::Grace),
+        (
+            licensing_state(
+                Value::Null,
+                "NotAuthenticated",
+                json!({ "featuresDeclined": true, "parkedReason": "StartedUnlicensed" }),
+            ),
+            K::Parked,
+        ),
+        (
+            licensing_state(Value::Null, "NotAuthenticated", json!({ "graceDeadline": null, "parkedReason": null })),
+            K::Unlicensed,
+        ),
+    ];
+    for (i, (state, kind)) in cases.iter().enumerate() {
+        peer.notify("jetbrains/licensing/state", state).unwrap();
+        eventually(|| license_views(&h).len() == i + 1).await;
+        assert_eq!(license_views(&h)[i].kind, *kind, "case {i}: {state}");
+    }
+
+    peer.notify(
+        "jetbrains/licensing/state",
+        json!({
+            "activeLicense": { "source": "subscription", "status": "Valid", "product": "IIU", "licensedTo": "Ann",
+                "licenseId": "L1", "validThrough": "2027-01-31", "daysLeft": 95, "assetId": "A1", "serverAddress": null },
+            "jbaLicensingState": {
+                "authenticationStatus": "Authenticated",
+                "accountInfo": { "displayName": "Ann", "email": "ann@example.com" },
+                "availableSubscriptions": [
+                    { "kind": "subscription", "assetId": "A1", "product": "IIU", "licensedTo": "Ann", "status": "Valid", "validThrough": "2027-01-31", "licenseId": "L1" },
+                    { "kind": "subscription", "assetId": "A2", "product": "IIU", "licensedTo": "Ann", "status": "Expired", "validThrough": "2020-01-31", "licenseId": "L2" }
+                ],
+                "errorMessage": null
+            },
+            "licenseServerFlowState": { "kind": "configured", "serverAddress": "https://ls.example.com", "status": "ok", "floatingTicketStatus": "Obtained" },
+            "featuresDeclined": false
+        }),
+    )
+    .unwrap();
+    eventually(|| license_views(&h).len() == cases.len() + 1).await;
+    let view = license_views(&h).pop().unwrap();
+    assert_eq!(view.kind, K::Licensed);
+    let active = view.license.unwrap();
+    assert_eq!(
+        (active.source.as_str(), active.licensed_to.as_deref(), active.days_left),
+        ("subscription", Some("Ann"), Some(95))
+    );
+    assert_eq!(active.server_address, None);
+    assert_eq!(view.account.display_name.as_deref(), Some("Ann"));
+    assert_eq!(view.account.email.as_deref(), Some("ann@example.com"));
+    assert_eq!(view.account.authentication_status, "Authenticated");
+    assert_eq!(view.subscriptions.len(), 1);
+    assert_eq!(
+        (view.subscriptions[0].asset_id.as_str(), view.subscriptions[0].license_id.as_deref()),
+        ("A1", Some("L1"))
+    );
+    assert_eq!(view.license_server.server_address.as_deref(), Some("https://ls.example.com"));
+    assert_eq!(view.license_server.floating_ticket_status.as_deref(), Some("Obtained"));
+    assert!(!view.env_license);
+}
+
+fn licensing_requests(s: &MockState) -> Vec<(String, Value)> {
+    s.requests.lock().iter().filter(|(m, _)| m.starts_with("jetbrains/licensing/")).cloned().collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_reads_the_license_and_tries_discovery_without_one() {
+    use ide_core::event::IntellijLicenseKind as K;
+    let h = harness(&[("intellij-server", licensing_caps())]);
+    let s = h.launcher.state("intellij-server");
+    let activated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let activated = activated.clone();
+        *s.responder.lock() = Some(Arc::new(move |_, method, _| match method {
+            "jetbrains/licensing/state/get" if activated.load(Ordering::SeqCst) => {
+                Some(licensing_state(license("Valid"), "NotAuthenticated", json!({})))
+            }
+            "jetbrains/licensing/state/get" => Some(licensing_state(Value::Null, "NotAuthenticated", json!({}))),
+            "jetbrains/licensing/discovery/autoActivate" => {
+                activated.store(true, Ordering::SeqCst);
+                Some(json!({ "activated": true, "source": "licenseFile" }))
+            }
+            _ => None,
+        }));
+    }
+    h.open("a.mk", "x");
+    eventually(|| license_views(&h).len() == 2).await;
+    assert_eq!(license_views(&h).iter().map(|v| v.kind).collect::<Vec<_>>(), vec![K::Unlicensed, K::Licensed]);
+    let sent = licensing_requests(&s);
+    let methods: Vec<&str> = sent.iter().map(|(m, _)| m.as_str()).collect();
+    assert_eq!(
+        methods,
+        vec![
+            "jetbrains/licensing/state/get",
+            "jetbrains/licensing/discovery/autoActivate",
+            "jetbrains/licensing/state/get"
+        ]
+    );
+    assert!(sent.iter().all(|(_, p)| *p == json!({})));
+    let server = h.mgr.servers()[0].id;
+    assert_eq!(h.mgr.intellij_license(server).unwrap().kind, K::Licensed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_skips_discovery_with_a_license_and_servers_without_licensing() {
+    let h = harness(&[("intellij-server", licensing_caps()), ("mock", licensing_caps())]);
+    let ij = h.launcher.state("intellij-server");
+    ij.respond("jetbrains/licensing/state/get", licensing_state(license("Expired"), "NotAuthenticated", json!({})));
+    h.open("a.mk", "x");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    eventually(|| license_views(&h).len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(licensing_requests(&ij).len(), 1);
+    assert!(licensing_requests(&h.launcher.state("mock")).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn licensing_requests_take_their_parameter_and_reject_unknown_names() {
+    let h = harness(&[("intellij-server", licensing_caps()), ("mock", incremental_caps())]);
+    let s = h.launcher.state("intellij-server");
+    s.respond("jetbrains/licensing/state/get", licensing_state(license("Valid"), "Authenticated", json!({})));
+    s.respond("jetbrains/licensing/activationCode/use", json!(true));
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let server = |name: &str| h.mgr.servers().into_iter().find(|i| i.name == name).unwrap().id;
+    let ij = server("intellij-server");
+
+    let used = h.mgr.intellij_licensing(ij, "activationCode/use", Some("CODE-1".into())).await.unwrap();
+    assert_eq!(used, json!(true));
+    h.mgr.intellij_licensing(ij, "jba/logout", None).await.unwrap();
+    let sent = licensing_requests(&s);
+    assert!(sent.contains(&("jetbrains/licensing/activationCode/use".into(), json!({ "activationCode": "CODE-1" }))));
+    assert!(sent.contains(&("jetbrains/licensing/jba/logout".into(), json!({}))));
+
+    let invalid = ide_core::error::ErrorKind::InvalidInput;
+    assert_eq!(h.mgr.intellij_licensing(ij, "jba/hack", None).await.unwrap_err().kind, invalid);
+    assert_eq!(h.mgr.intellij_licensing(ij, "subscriptions/use", None).await.unwrap_err().kind, invalid);
+    assert!(h.mgr.intellij_licensing(server("mock"), "state/get", None).await.is_err());
+    assert_eq!(licensing_requests(&s).len(), sent.len());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_state_push_wins_over_an_older_state_reply() {
+    use ide_core::event::IntellijLicenseKind as K;
+    let h = harness(&[("intellij-server", licensing_caps())]);
+    let s = h.launcher.state("intellij-server");
+    let gate = Arc::new(Gate::default());
+    {
+        let gate = gate.clone();
+        *s.responder.lock() = Some(Arc::new(move |_, method, _| {
+            (method == "jetbrains/licensing/state/get").then(|| {
+                gate.hold();
+                licensing_state(Value::Null, "NotAuthenticated", json!({ "featuresDeclined": true }))
+            })
+        }));
+    }
+    h.open("a.mk", "x");
+    eventually(|| gate.entered()).await;
+    s.peer()
+        .notify("jetbrains/licensing/state", licensing_state(license("Valid"), "Authenticated", json!({})))
+        .unwrap();
+    eventually(|| license_views(&h).len() == 1).await;
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let kinds: Vec<K> = license_views(&h).iter().map(|v| v.kind).collect();
+    assert_eq!(kinds, vec![K::Licensed], "the reply that crossed the push is dropped");
+    assert!(s.requested("jetbrains/licensing/discovery/autoActivate").is_empty());
+    let server = h.mgr.servers()[0].id;
+    assert_eq!(h.mgr.intellij_license(server).unwrap().kind, K::Licensed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_in_pages_open_in_the_browser() {
+    let h = harness(&[("intellij-server", licensing_caps()), ("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let ij = h.launcher.state("intellij-server").peer();
+    let mock = h.launcher.state("mock").peer();
+    let url = "https://account.jetbrains.com/oauth2/auth?x=1";
+    let show = |peer: Peer, params: Value| async move {
+        peer.request::<_, Value>("window/showDocument", params, None).await.unwrap()
+    };
+
+    assert_eq!(show(ij.clone(), json!({ "uri": url, "external": true })).await, json!({ "success": true }));
+    assert_eq!(show(ij.clone(), json!({ "uri": url })).await, json!({ "success": false }));
+    assert_eq!(show(ij, json!({ "uri": "file:///etc/passwd", "external": true })).await, json!({ "success": false }));
+    assert_eq!(show(mock, json!({ "uri": url, "external": true })).await, json!({ "success": false }));
+
+    let ij_id = h.mgr.servers().into_iter().find(|i| i.name == "intellij-server").unwrap().id;
+    let opened: Vec<(ServerId, String)> = h
+        .events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::OpenExternalUrl { server, url } => Some((*server, url.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, vec![(ij_id, url.to_owned())]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn server_cancelled_requests_count_as_cancelled() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let (doc, _) = h.open("a.mk", "x");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let s = h.launcher.state("mock");
+    s.errors.lock().insert("textDocument/hover".into(), (-32802, "no license".into()));
+    let err = h.mgr.hover(doc, Pos::new(0, 0), Default::default()).await.unwrap_err();
+    assert_eq!(err.kind, ide_core::error::ErrorKind::Cancelled);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn getting_a_license_refreshes_the_editor_data() {
+    let h = harness(&[("intellij-server", licensing_caps())]);
+    let (_, path) = h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Ready).await;
+    let s = h.launcher.state("intellij-server");
+    let uri = uri_of(&path);
+    eventually(|| s.docs.lock().contains_key(&uri)).await;
+    let refreshes = || h.events.lock().iter().filter(|e| matches!(e, IdeEvent::LspRefresh { .. })).count();
+    let push = |state: Value| s.peer().notify("jetbrains/licensing/state", state).unwrap();
+
+    push(licensing_state(Value::Null, "NotAuthenticated", json!({ "featuresDeclined": true })));
+    push(licensing_state(Value::Null, "Authenticating", json!({ "featuresDeclined": true })));
+    eventually(|| license_views(&h).len() == 2).await;
+    push(licensing_state(license("Valid"), "Authenticated", json!({})));
+    eventually(|| refreshes() == 3).await;
+    let server = h.mgr.servers()[0].id;
+    let kinds: Vec<ide_core::event::LspRefreshKind> = h
+        .events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::LspRefresh { server: id, kind } if *id == server => Some(*kind),
+            _ => None,
+        })
+        .collect();
+    use ide_core::event::LspRefreshKind as R;
+    assert_eq!(kinds, vec![R::SemanticTokens, R::InlayHints, R::CodeLens]);
+    eventually(|| s.notified("textDocument/didOpen").len() == 2).await;
+    assert_eq!(s.notified("textDocument/didClose").len(), 1);
+    assert_eq!(s.docs.lock().get(&uri).map(String::as_str), Some("x"));
+
+    push(licensing_state(license("Valid"), "Authenticated", json!({ "featuresDeclined": false })));
+    eventually(|| license_views(&h).len() == 4).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(refreshes(), 3);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_user_agreement_is_not_restarted() {
+    let h = harness(&[("intellij-server", licensing_caps())]);
+    let s = h.launcher.state("intellij-server");
+    *s.exit_code.lock() = Some(11);
+    h.open("a.mk", "x");
+    h.wait_status("intellij-server", ServerStatus::Crashed).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(s.launches.load(Ordering::SeqCst), 1);
+    let message = h.events.lock().iter().rev().find_map(|e| match e {
+        IdeEvent::LanguageServer { status: ServerStatus::Crashed, message, .. } => message.clone(),
+        _ => None,
+    });
+    assert_eq!(message.as_deref(), Some("the JetBrains User Agreement was not accepted"));
 }

@@ -341,6 +341,17 @@ export const commands = {
 	/**  Re-emits the language servers' current diagnostics (the UI loaded after they arrived). */
 	lspResendDiagnostics: () => typedError<null, IdeError>(__TAURI_INVOKE("lsp_resend_diagnostics")),
 	lspRestart: (server: ServerId) => typedError<null, IdeError>(__TAURI_INVOKE("lsp_restart", { server })),
+	lspIntellijLicensing: (server: ServerId, request: string, value: string | null) => typedError<IntellijLicensingReply, IdeError>(__TAURI_INVOKE("lsp_intellij_licensing", { server, request, value })),
+	lspIntellijLicense: (server: ServerId) => typedError<{
+	kind: IntellijLicenseKind,
+	license: IntellijActiveLicense | null,
+	account: IntellijAccount,
+	subscriptions: IntellijSubscription[],
+	licenseServer: IntellijLicenseServer,
+	parkedReason: string | null,
+	graceDeadline: number | null,
+	envLicense: boolean,
+} | null, IdeError>(__TAURI_INVOKE("lsp_intellij_license", { server })),
 	/**  Applies a (previewed) workspace edit, e.g. after rename confirmation. */
 	applyWorkspaceEdit: (edit: WorkspaceEdit) => typedError<null, IdeError>(__TAURI_INVOKE("apply_workspace_edit", { edit })),
 	/**
@@ -3136,7 +3147,7 @@ export type IdeEvent =
 /**  A child process (`ssh`, `git`) asks for a credential; answered with `ssh_askpass_answer`. */
 { type: "askpass"; id: number; prompt: string; kind: AskpassKind } | 
 /**  Prompt `id` was answered (in any window) or gave up. */
-{ type: "askpassDone"; id: number };
+{ type: "askpassDone"; id: number } | { type: "intellijLicense"; server: ServerId; view: IntellijLicenseView } | { type: "openExternalUrl"; server: ServerId; url: string };
 
 /**  An identifier-like token whose text equals the searched name. */
 export type IdentifierOccurrence = {
@@ -3302,11 +3313,59 @@ export type InstallEvent =
 /**  Download progress; `fraction` is 0..1 when the size is known. */
 { type: "progress"; fraction: number | null; message: string };
 
+export type IntellijAccount = {
+	authenticationStatus: string,
+	displayName: string | null,
+	email: string | null,
+	errorMessage: string | null,
+};
+
+export type IntellijActiveLicense = {
+	source: string,
+	status: string,
+	product: string,
+	licensedTo: string | null,
+	validThrough: string | null,
+	daysLeft: number | null,
+	assetId: string | null,
+	serverAddress: string | null,
+};
+
+export type IntellijLicenseKind = "authenticating" | "sessionExpired" | "licensed" | "grace" | "parked" | "unlicensed";
+
+export type IntellijLicenseServer = {
+	kind: string,
+	serverAddress: string | null,
+	floatingTicketStatus: string | null,
+	errorMessage: string | null,
+};
+
+export type IntellijLicenseView = {
+	kind: IntellijLicenseKind,
+	license: IntellijActiveLicense | null,
+	account: IntellijAccount,
+	subscriptions: IntellijSubscription[],
+	licenseServer: IntellijLicenseServer,
+	parkedReason: string | null,
+	graceDeadline: number | null,
+	envLicense: boolean,
+};
+
+export type IntellijLicensingReply = unknown;
+
 export type IntellijServerSettings = {
 	acceptedTerms?: boolean,
 	declined?: boolean,
 	region?: string,
 	dataSharing?: string,
+};
+
+export type IntellijSubscription = {
+	assetId: string,
+	product: string,
+	licensedTo: string | null,
+	validThrough: string | null,
+	licenseId: string | null,
 };
 
 /**  Optional parts of the invalidation; the symbol index is always rebuilt. */
