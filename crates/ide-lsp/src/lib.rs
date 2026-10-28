@@ -804,14 +804,13 @@ impl LspManager {
         let (d, retired) = {
             let mut docs = self.docs.lock();
             let Some(d) = docs.remove(&doc) else { return };
-            let retired = self.retire_shadowed(&docs, d.servers.iter().map(|a| a.server.clone()).collect());
+            let retired = if is_virtual_uri(d.uri.as_str()) {
+                self.retire_shadowed(&docs, d.servers.iter().map(|a| a.server.clone()).collect())
+            } else {
+                Vec::new()
+            };
             (d, retired)
         };
-        if !retired.is_empty()
-            && let Some(me) = self.me.upgrade()
-        {
-            self.runtime.spawn(async move { me.stop_retired(&retired).await });
-        }
         for a in &d.servers {
             let Some(run) = a.server.running() else { continue };
             if a.opened_gen == Some(run.generation)
@@ -820,6 +819,11 @@ impl LspManager {
             {
                 tracing::debug!("{}: didClose: {e}", a.server.name);
             }
+        }
+        if !retired.is_empty()
+            && let Some(me) = self.me.upgrade()
+        {
+            self.runtime.spawn(async move { me.stop_retired(&retired).await });
         }
     }
 

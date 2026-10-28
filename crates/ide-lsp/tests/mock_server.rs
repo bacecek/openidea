@@ -30,6 +30,7 @@ struct MockState {
     errors: Mutex<HashMap<String, (i64, String)>>,
     exit_code: Mutex<Option<i32>>,
     init_gate: Mutex<Option<Arc<Gate>>>,
+    missing_root: Mutex<Option<PathBuf>>,
     shutdown_gate: Mutex<Option<Arc<Gate>>>,
     /// Computes a response from the request and the open documents (before `responses`).
     responder: Mutex<Option<Responder>>,
@@ -169,7 +170,7 @@ impl Launcher for MockLauncher {
         on_stderr: Box<dyn Fn(String) + Send + Sync>,
     ) -> Result<Peer, LaunchError> {
         let state = self.state(&config.name);
-        if state.missing.load(Ordering::SeqCst) {
+        if state.missing.load(Ordering::SeqCst) || state.missing_root.lock().as_deref() == Some(root) {
             return Err(LaunchError::Missing);
         }
         state.launches.fetch_add(1, Ordering::SeqCst);
@@ -2973,4 +2974,27 @@ async fn a_virtual_document_keeps_the_fallback_until_it_closes() {
     eventually(|| h.removed("alt")).await;
     assert_eq!(h.statuses("alt").last(), Some(&ServerStatus::Stopped));
     assert_eq!(names(&h), ["main"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_file_keeps_the_fallback_of_another_root() {
+    let h = harness_with_fallbacks(&[("main", incremental_caps()), ("alt", incremental_caps())], &["alt"]);
+    for dir in ["a", "b"] {
+        std::fs::create_dir(h.root.join(dir)).unwrap();
+        std::fs::write(h.root.join(dir).join("mock.toml"), "").unwrap();
+    }
+    *h.launcher.state("main").missing_root.lock() = Some(h.root.join("b"));
+    h.open("a/x.mk", "x");
+    h.wait_status("main", ServerStatus::Ready).await;
+    let (doc, path) = h.open("b/y.mk", "y");
+    let alt = h.launcher.state("alt");
+    h.wait_status("alt", ServerStatus::Ready).await;
+    eventually(|| alt.docs.lock().contains_key(&uri_of(&path))).await;
+
+    h.mgr.did_close(doc);
+    eventually(|| alt.notified("textDocument/didClose").len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!h.removed("alt"));
+    assert_eq!(h.statuses("alt").last(), Some(&ServerStatus::Ready));
+    assert!(names(&h).contains(&"alt".to_owned()));
 }
