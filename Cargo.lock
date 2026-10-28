@@ -4145,6 +4145,7 @@ dependencies = [
  "ide-vcs",
  "ide-vfs",
  "ide-workspace",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",

@@ -152,7 +152,10 @@ impl Host {
                     ide_sdk::jdtls::launch_directly(cfg);
                 }
                 if cfg.name == "intellij-server" {
-                    let system = data_dir.join("lsp").join("intellij-server").join(self::project_key(server_root));
+                    let system = claim_system_dir(
+                        &data_dir.join("lsp").join("intellij-server"),
+                        &self::project_key(server_root),
+                    );
                     cfg.args.extend(["--system-path".into(), system.to_string_lossy().into_owned()]);
                 }
                 ide_sdk::apply::server_protocol_overrides(cfg, &effective);
@@ -662,6 +665,34 @@ fn project_key(root: &Path) -> String {
     format!("{h:016x}")
 }
 
+fn claim_system_dir(base: &Path, key: &str) -> PathBuf {
+    let me = std::process::id();
+    for n in 1..=8 {
+        let dir = if n == 1 { base.join(key) } else { base.join(format!("{key}-{n}")) };
+        let owner = dir.join("openidea.pid");
+        let free = match std::fs::read_to_string(&owner).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
+            Some(pid) => pid == me || !process_alive(pid),
+            None => true,
+        };
+        if free && std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&owner, me.to_string())).is_ok() {
+            return dir;
+        }
+    }
+    base.join(key)
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    pid > 0
+        && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
 struct LspObserver(Arc<LspManager>);
 
 impl DocumentObserver for LspObserver {
@@ -777,4 +808,68 @@ fn notify_transfer(sink: &SharedSink, what: &str, path: &Path, result: IdeResult
 pub fn apply_git_executable(settings: &ide_core::settings::Settings) {
     let exe = settings.vcs.git.executable.trim();
     ide_vcs::set_git_executable((!exe.is_empty()).then(|| Path::new(exe)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claim_system_dir;
+
+    fn owner(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("openidea.pid")).unwrap_or_default()
+    }
+
+    #[test]
+    fn free_slot_is_claimed_with_our_pid() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = claim_system_dir(base.path(), "k");
+        assert_eq!(dir, base.path().join("k"));
+        assert_eq!(owner(&dir), std::process::id().to_string());
+    }
+
+    fn own(base: &std::path::Path, slot: &str, pid: u32) {
+        std::fs::create_dir_all(base.join(slot)).unwrap();
+        std::fs::write(base.join(slot).join("openidea.pid"), pid.to_string()).unwrap();
+    }
+
+    #[test]
+    fn slot_owned_by_us_is_reused() {
+        let base = tempfile::tempdir().unwrap();
+        own(base.path(), "k", std::process::id());
+        assert_eq!(claim_system_dir(base.path(), "k"), base.path().join("k"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slot_owned_by_live_process_is_skipped() {
+        let base = tempfile::tempdir().unwrap();
+        own(base.path(), "k", 1);
+        let dir = claim_system_dir(base.path(), "k");
+        assert_eq!(dir, base.path().join("k-2"));
+        assert_eq!(owner(&dir), std::process::id().to_string());
+        assert_eq!(owner(&base.path().join("k")), "1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slot_owned_by_dead_process_is_reclaimed() {
+        let base = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        own(base.path(), "k", child.id());
+        let dir = claim_system_dir(base.path(), "k");
+        assert_eq!(dir, base.path().join("k"));
+        assert_eq!(owner(&dir), std::process::id().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_slots_taken_falls_back_to_first() {
+        let base = tempfile::tempdir().unwrap();
+        own(base.path(), "k", 1);
+        for n in 2..=8 {
+            own(base.path(), &format!("k-{n}"), 1);
+        }
+        assert_eq!(claim_system_dir(base.path(), "k"), base.path().join("k"));
+        assert!(!base.path().join("k-9").exists());
+    }
 }
