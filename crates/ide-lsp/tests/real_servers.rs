@@ -409,6 +409,12 @@ async fn intellij_server_end_to_end() {
     let servers = mgr.servers();
     assert_eq!(servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["intellij-server"]);
     assert_eq!(servers[0].root, root);
+    let view = retry("license view", Duration::from_secs(60), || {
+        let v = mgr.intellij_license(servers[0].id);
+        async move { v }
+    })
+    .await;
+    assert_eq!(view.kind, ide_core::event::IntellijLicenseKind::Licensed);
 
     let hover = retry("hover", Duration::from_secs(300), || {
         let mgr = mgr.clone();
