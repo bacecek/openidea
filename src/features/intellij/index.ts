@@ -3,10 +3,12 @@ import { useProject } from "@/platform/project";
 import { useServers } from "@/features/code-insight/servers";
 import { installTool, refreshTools, toolByName } from "@/features/tools/store";
 import { askConsent, INTELLIJ_FALLBACKS, INTELLIJ_SERVER, intellijUndecided } from "./consent";
+import { installLicensing } from "./license";
 
 export function activate(): () => void {
   let asked = false;
-  return onIdeEvent("languageServer", (e) => {
+  const offLicensing = installLicensing();
+  const offConsent = onIdeEvent("languageServer", (e) => {
     const languages = useServers.getState().servers.get(e.server)?.languages ?? [];
     const java = INTELLIJ_FALLBACKS.includes(e.name) || languages.some((l) => l === "java" || l === "kotlin");
     if (asked || !java || !useProject.getState().settings || !intellijUndecided()) return;
@@ -19,4 +21,8 @@ export function activate(): () => void {
       })
       .catch((err) => console.warn("[intellij]", err));
   });
+  return () => {
+    offConsent();
+    offLicensing();
+  };
 }

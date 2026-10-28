@@ -26,3 +26,7 @@
 .link:hover {
   text-decoration: underline;
 }
+
+.url {
+  word-break: break-all;
+}
